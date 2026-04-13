@@ -1,0 +1,237 @@
+我结合代码来详细讲解。核心逻辑在 _make_random_forward() 生成的 patched_forward 中，位于               
+  qwen2_5_vl_random.py 的第 148-185 行。                                                                
+                                                                                                        
+  整体流程                                                                                              
+                                                                                                        
+  随机剔除发生在模型 forward 的一个非常精确的时间点：视频 token 已经嵌入到 inputs_embeds 之后、送入 LLM 
+  decoder 之前。                                                                                        
+                                                                                                        
+  用一个具体例子来说明。假设输入序列长度为 1000 个 token，其中视频占 600 个                             
+  token，retention_ratio=0.25：                                                                         
+                                                                                                        
+  [system_prompt(50)] [video_tokens(600)] [question_text(350)]                                          
+                                                                                                        
+  分步解析                                                                                              
+                                                                                                        
+  第一步：定位视频 token 的位置                                                                         
+                                                                                                        
+  visual_start_index = (                                                                                
+      torch.where(input_ids[0] == self.config.video_token_id)[0][0].item()                              
+  )                                                                                                     
+  visual_end_index = visual_start_index + n_video_tokens                                                
+                                                                                                        
+  在 input_ids 中找到第一个 video_token_id 的位置。Qwen2.5-VL 用一个特殊 token ID                       
+  标记视频占位符，连续出现 n_video_tokens                                                               
+  个。以上面的例子，visual_start_index=50，visual_end_index=650。                                       
+                                                                                                        
+  第二步：计算要保留多少个                                                                              
+                                                                                                        
+  num_keep = max(1, int(n_video_tokens * retention_ratio))                                              
+                                                                                                        
+  600 * 0.25 = 150，保留 150 个视频 token，丢弃 450 个。                                                
+                                                                                                        
+  第三步：随机选择保留哪些                                                                              
+                                                                                                        
+  perm = torch.randperm(n_video_tokens, device=inputs_embeds.device)[:num_keep]                         
+  keep_visual_local = perm.sort().values                                                                
+                                                                                                        
+  torch.randperm(600) 生成 [0, 599] 的随机排列，取前 150 个作为保留的局部索引，然后 排序 保证保留 token 
+  的相对顺序不变。比如结果可能是 [3, 17, 25, 42, ...]。                                                 
+                                                                                                        
+  第四步：构建全局保留索引                                                                              
+                                                                                                        
+  global_indices = torch.arange(input_ids.shape[-1], device=...)  # [0, 1, ..., 999]                    
+                                                                                                        
+  keep_global_indices = torch.cat([                                                                     
+      global_indices[:visual_start_index],                              # 前缀文本: [0..49]             
+      global_indices[visual_start_index:visual_end_index][keep_visual_local],  # 保留的视频: 150个      
+      global_indices[visual_end_index:],                                # 后缀文本: [650..999]          
+  ], dim=0)                                                                                             
+                                                                                                        
+  把三部分拼起来：                                                                                      
+  - 前缀（system prompt）：50 个 token，全部保留                                                        
+  - 视频：从 600 个中只保留随机选出的 150 个                                                            
+  - 后缀（问题文本）：350 个 token，全部保留                                                            
+                                                                                                        
+  最终序列从 1000 缩短到 50 + 150 + 350 = 550。                                                         
+                                                                                                        
+  第五步：用这组索引过滤所有张量                                                                        
+                                                                                                        
+  inputs_embeds = torch.gather(inputs_embeds, dim=1, index=...)  # [1, 1000, D] -> [1, 550, D]          
+  position_ids  = position_ids[:, :, keep_global_indices]         # [3, 1, 1000] -> [3, 1, 550]         
+  attention_mask = attention_mask[:, keep_global_indices]          # [1, 1000] -> [1, 550]              
+  cache_position = cache_position[keep_global_indices]            # [1000] -> [550]                     
+                                                                                                        
+  四个张量必须同步裁剪：                                                                                
+  张量: inputs_embeds                                                                                   
+  作用: 每个 token 的向量表示                                                                           
+  为什么必须同步: 丢弃的 token 不再参与计算                                                             
+  ────────────────────────────────────────                                                              
+  张量: position_ids                                                                                    
+  作用: Qwen2.5-VL 的 3D RoPE 位置编码（时间、高度、宽度）                                              
+  为什么必须同步: 保留原始位置值，不重新编号，这样模型仍知道保留 token 的时空位置                       
+  ────────────────────────────────────────                                                              
+  张量: attention_mask                                                                                  
+  作用: 标记哪些位置有效                                                                                
+  为什么必须同步: 序列变短，mask 也要跟着缩                                                             
+  ────────────────────────────────────────                                                              
+  张量: cache_position                                                                                  
+  作用: KV cache 的绝对位置索引                                                                         
+  为什么必须同步: 生成阶段需要知道每个 token 的绝对位置                                                 
+  第六步：送入 LLM                                                                                      
+                                                                                                        
+  outputs = self.language_model(                                                                        
+      input_ids=None,                                                                                   
+      position_ids=position_ids,      # 裁剪后                                                          
+      attention_mask=attention_mask,   # 裁剪后                                                         
+      inputs_embeds=inputs_embeds,     # 裁剪后                                                         
+      cache_position=cache_position,   # 裁剪后                                                         
+      ...                                                                                               
+  )                                                                                                     
+                                                                                                        
+  LLM 看到的就是一个长度为 550 的序列，完全不知道有 token 被丢弃过。                                    
+                                                                                                        
+  触发条件                                                                                              
+                                                                                                        
+  if (                                                                                                  
+      n_video_tokens is not None       # 有视频输入                                                     
+      and position_ids.shape[-1] > 1   # 是 prefill 阶段，不是逐 token 解码                             
+      and retention_ratio < 1.0        # ratio < 1 才需要丢弃                                           
+  ):                                                                                                    
+                                                                                                        
+  只在 prefill（首次处理完整输入）时做一次随机选择。后续逐 token 生成时 position_ids.shape[-1] ==       
+  1，不会触发。                                                                                         
+                                                                                                        
+  与 FlashVID 的对比                                                                                    
+  ┌───────────────────┬────────────────────────────────┬────────────────────────┐                       
+  │                   │            FlashVID            │         Random         │                       
+  ├───────────────────┼────────────────────────────────┼────────────────────────┤                       
+  │ 选择策略          │ 注意力权重 + 多样性 + 时空合并 │ 纯随机 randperm        │                       
+  ├───────────────────┼────────────────────────────────┼────────────────────────┤                       
+  │ 视觉编码器修改    │ 需要提取 CLS attention         │ 不修改                 │                       
+  ├───────────────────┼────────────────────────────────┼────────────────────────┤                       
+  │ Inner-LLM Pruning │ 在第 20 层再做一次剪枝         │ 不做                   │                       
+  ├───────────────────┼────────────────────────────────┼────────────────────────┤                       
+  │ 用途              │ 生产使用                       │ 作为 baseline 对照实验 │                       
+  └───────────────────┴────────────────────────────────┴────────────────────────┘                     
+
+
+❯ 我想知道，现在的这种random丢弃token的方式，会影响后续的generate阶段的模型推理吗？            
+                                                                                               
+● 这是一个好问题。我来逐步分析 prefill 阶段的 token 丢弃对后续 autoregressive decoding         
+  阶段的影响。                                                                                 
+                                                                                               
+  结论：机制上不会出错，但生成质量会受影响                                                     
+                                                                                               
+  1. Generate 的两个阶段回顾                                                                   
+                                                                                               
+  Prefill 阶段:  一次性处理完整输入，构建 KV Cache                                             
+                  position_ids.shape[-1] = 550 (过滤后)                                        
+                  → 随机丢弃在这里触发 ✔                                                       
+                                                                                               
+  Decoding 阶段:  逐 token 生成                                                                
+                  position_ids.shape[-1] = 1                                                   
+                  → 条件不满足，随机丢弃不会触发 ✔                                             
+                                                                                               
+  所以丢弃只发生一次，不会在生成过程中反复触发。                                               
+                                                                                               
+  2. KV Cache 是否一致                                                                         
+                                                                                               
+  Prefill 结束后，DynamicCache 通过 torch.cat 追加 KV 对，里面存了 550 个 entry。Decoding      
+  阶段新 token 通过 attention 去读这 550 个 entry，不会出现越界或对错位置。                    
+                                                                                               
+  3. Position IDs 是否正确——这是最关键的                                                       
+                                                                                               
+  来追踪一下 rope_deltas 的传递链：                                                            
+                                                                                               
+  Prefill 时:                                                                                  
+    ① get_rope_index(input_ids, ...)  ← 用的是原始 input_ids (1000个token)                     
+       → 返回 position_ids, rope_deltas                                                        
+       → self.rope_deltas = rope_deltas                                                        
+       → rope_deltas = max_position - (1000 - 1)                                               
+                                                                                               
+    ② 过滤 position_ids = position_ids[:, :, keep_global_indices]                              
+       → 变成 550 个，但值保持原始值（不重新编号）                                             
+                                                                                               
+    ③ LLM 处理 550 个 token，建立 KV Cache                                                     
+                                                                                               
+  Decoding 时 (generate 框架控制):                                                             
+    ① generate 函数自己追踪 cache_position                                                     
+       → 它不知道 forward 内部过滤了 cache_position                                            
+       → 第一个生成 token 的 cache_position[0] = 1000（原始序列长度）                          
+                                                                                               
+    ② 进入 forward 的 else 分支:                                                               
+       position_ids = 0 + (cache_position[0] + rope_deltas)                                    
+                    = 0 + (1000 + (max_position - 999))                                        
+                    = max_position + 1  ← 恰好是正确的下一个位置 ✔                             
+                                                                                               
+  数学上刚好抵消了：generate 框架用原始序列长度追踪 cache_position，而 rope_deltas             
+  也是基于原始序列长度计算的，两者配合后生成 token 拿到的 position 是正确的。                  
+                                                                                               
+  4. Causal Mask 是否正确                                                                      
+                                                                                               
+  Decoding 阶段的 causal mask 基于 KV Cache 的实际长度（550）构建，新 token 允许 attend 到所有 
+  550 个 cached entry，没有问题。                                                              
+                                                                                               
+  5. 真正的影响：生成质量                                                                      
+                                                                                               
+  机制上没有错误，但实际影响在于 LLM 可用的视觉信息变少了：                                    
+  ┌──────────────────────┬──────┬─────────────────────────────────────────┐                    
+  │                      │ 原始 │          随机丢弃 (ratio=0.25)          │                    
+  ├──────────────────────┼──────┼─────────────────────────────────────────┤                    
+  │ LLM 看到的视频 token │ 600  │ 150                                     │                    
+  ├──────────────────────┼──────┼─────────────────────────────────────────┤                    
+  │ 丢弃策略             │ 无   │ 纯随机，无信息量判断                    │                    
+  ├──────────────────────┼──────┼─────────────────────────────────────────┤                    
+  │ 可能丢失的信息       │ 无   │ 关键帧、关键区域的 token 可能被随机丢掉 │                    
+  └──────────────────────┴──────┴─────────────────────────────────────────┘                    
+  这正是这个 random baseline 的意义——和 FlashVID 的智能选择做对比，量化「有策略地选            
+  token」比「随机选 token」好多少。                                                            
+                                                                                               
+✻ Brewed for 2m 41s                                                                            
+                                                                                               
+❯ 此外，我想知道，这里随机丢弃的token，是在进入大模型内部之前丢弃的，还是进入大模型之后丢      
+  弃的呢                                                                                       
+                                                                                               
+● 在进入大模型（LLM decoder）之前丢弃的。                                                      
+                                                                                               
+  来看 Qwen2_5_VLModel.forward 中代码的执行顺序：                                              
+                                                                                               
+  ┌─────────────────────────────────────────────────┐                                          
+  │  Qwen2_5_VLModel.forward (我们 patch 的函数)      │                                        
+  │                                                 │                                          
+  │  ① inputs_embeds = self.get_input_embeddings()  │  ← 文本 token 嵌入                       
+  │                                                 │                                          
+  │  ② image_embeds = self.get_image_features(...)  │  ← 视觉编码器处理图片                    
+  │     inputs_embeds.masked_scatter(image_embeds)   │                                         
+  │                                                 │                                          
+  │  ③ video_embeds = self.get_video_features(...)  │  ← 视觉编码器处理视频                    
+  │     inputs_embeds.masked_scatter(video_embeds)   │                                         
+  │                                                 │                                          
+  │  ④ position_ids = self.get_rope_index(...)      │  ← 计算 3D RoPE 位置                     
+  │                                                 │                                          
+  │  ⑤ 随机丢弃视频 token ← ★ 在这里 ★              │                                          
+  │     inputs_embeds = gather(keep_global_indices)  │                                         
+  │     position_ids  = position_ids[keep]           │                                         
+  │     attention_mask = attention_mask[keep]         │                                        
+  │     cache_position = cache_position[keep]        │                                         
+  │                                                 │                                          
+  │  ⑥ outputs = self.language_model(               │  ← LLM decoder                           
+  │        inputs_embeds=inputs_embeds,  # 已裁剪    │                                         
+  │        position_ids=position_ids,    # 已裁剪    │                                         
+  │        ...                                      │                                          
+  │     )                                           │                                          
+  └─────────────────────────────────────────────────┘                                          
+                                                                                               
+  丢弃发生在 步骤 ⑤，即：                                                                      
+                                                                                               
+  - 视觉编码器已经跑完（步骤 ②③），视频的每一帧已经被编码成 embedding 并填入 inputs_embeds     
+  - 3D RoPE 位置已经算好（步骤 ④）                                                             
+  - 但 LLM decoder 还没开始（步骤 ⑥）                                                          
+                                                                                               
+  所以视觉编码器的计算量没有省，省掉的是 LLM decoder 处理 token 的计算量——序列从 1000 缩短到   
+  550，LLM 的 self-attention 复杂度从 O(1000²) 降到 O(550²)。                                  
+                                                                                               
+  这一点和 FlashVID 的 vision-side compression 阶段是同一个位置。区别在于 FlashVID             
+  在这之后还有一个 Inner-LLM Pruning（在 LLM 第 20 层内部再做一次剪枝），而 random             
+  模型不做这步。

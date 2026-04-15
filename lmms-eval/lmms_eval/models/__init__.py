@@ -96,6 +96,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "llava_hf": "LlavaHf",
     "qwen3_vl": "Qwen3_VL",
     "qwen3_vl_ours_v2": "Qwen3_VL_Ours_V2",
+    "qwen3_vl_random": "Qwen3_VL_Random",
     "qwen2_5_vl": "Qwen2_5_VL",
     "qwen2_5_vl_mmtok": "Qwen2_5_VL_MMTok",
     "qwen2_5_vl_random": "Qwen2_5_VL_Random",

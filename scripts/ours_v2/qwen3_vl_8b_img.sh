@@ -20,7 +20,12 @@ else
 fi
 
 # Pretrained model path.
-PRETRAINED="${PRETRAINED:-Qwen/Qwen3-VL-8B-Instruct}"
+AUTODL_MODEL_PATH="${HOME}/autodl-tmp/Qwen3-VL-8B-Instruct"
+DEFAULT_PRETRAINED="Qwen/Qwen3-VL-8B-Instruct"
+if [[ -d "$AUTODL_MODEL_PATH" ]]; then
+    DEFAULT_PRETRAINED="$AUTODL_MODEL_PATH"
+fi
+PRETRAINED="${PRETRAINED:-$DEFAULT_PRETRAINED}"
 
 # FETP arguments.
 if [[ -n "${RETENTION_RATIOS_CSV:-}" ]]; then

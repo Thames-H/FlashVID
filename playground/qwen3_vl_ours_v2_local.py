@@ -1,3 +1,4 @@
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,17 +14,29 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LMMS_EVAL_ROOT = REPO_ROOT / "lmms-eval"
 DEFAULT_REPO_ID = "Qwen/Qwen3-VL-8B-Instruct"
 DEFAULT_MODEL_DIRNAME = "Qwen3-VL-8B-Instruct"
+DEFAULT_AUTODL_MODEL_PATH = Path.home() / "autodl-tmp" / DEFAULT_MODEL_DIRNAME
 if str(LMMS_EVAL_ROOT) not in sys.path:
     sys.path.insert(0, str(LMMS_EVAL_ROOT))
 
 from lmms_eval.models.chat.qwen3_vl_ours_v2 import _make_fetp_forward
 
 
+def resolve_default_model_path() -> str:
+    override = Path(
+        os.environ.get("QWEN3_VL_MODEL_PATH", "")
+    ).expanduser() if os.environ.get("QWEN3_VL_MODEL_PATH") else None
+    if override:
+        return str(override)
+    if DEFAULT_AUTODL_MODEL_PATH.exists():
+        return str(DEFAULT_AUTODL_MODEL_PATH)
+    return str(REPO_ROOT / DEFAULT_MODEL_DIRNAME)
+
+
 @dataclass
 class InferenceArguments:
     question: str = field(default="Describe the video in detail.")
     video_path: str = field(default=str(REPO_ROOT / "assets" / "Qgr4dcsY-60.mp4"))
-    model_path: str = field(default=str(REPO_ROOT / DEFAULT_MODEL_DIRNAME))
+    model_path: str = field(default_factory=resolve_default_model_path)
     num_frames: int = field(default=16)
     max_new_tokens: int = field(default=512)
     enable_ours_v2: bool = field(default=True)
@@ -46,7 +59,8 @@ def load_model(model_path: str, attn_implementation: str):
     if not Path(model_path).exists():
         raise FileNotFoundError(
             f"Model path not found: {model_path}. "
-            f"Download {DEFAULT_REPO_ID} into {REPO_ROOT / DEFAULT_MODEL_DIRNAME} first."
+            f"Set QWEN3_VL_MODEL_PATH, place weights in {DEFAULT_AUTODL_MODEL_PATH}, "
+            f"or download {DEFAULT_REPO_ID} into {REPO_ROOT / DEFAULT_MODEL_DIRNAME}."
         )
 
     model = Qwen3VLForConditionalGeneration.from_pretrained(

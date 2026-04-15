@@ -26,6 +26,8 @@ class TestLocalQwen3VLOursV2Assets(TestCase):
                 default_strings.append(node.value)
         self.assertIn("Qwen/Qwen3-VL-8B-Instruct", default_strings)
         self.assertIn("Qwen3-VL-8B-Instruct", default_strings)
+        self.assertIn("QWEN3_VL_MODEL_PATH", default_strings)
+        self.assertIn("autodl-tmp", default_strings)
 
         downloader_strings = []
         for node in ast.walk(downloader_ast):
@@ -33,6 +35,8 @@ class TestLocalQwen3VLOursV2Assets(TestCase):
                 downloader_strings.append(node.value)
         self.assertIn("Qwen/Qwen3-VL-8B-Instruct", downloader_strings)
         self.assertIn("Qwen3-VL-8B-Instruct", downloader_strings)
+        self.assertIn("QWEN3_VL_MODEL_PATH", downloader_strings)
+        self.assertIn("autodl-tmp", downloader_strings)
 
     def test_qwen3_wrappers_default_to_8b_instruct(self):
         repo_root = Path(__file__).resolve().parents[4]
@@ -75,3 +79,4 @@ class TestLocalQwen3VLOursV2Assets(TestCase):
         self.assertIn('"pope"', script_text)
         self.assertIn('"ocrbench"', script_text)
         self.assertIn("--model qwen3_vl_ours_v2", script_text)
+        self.assertIn("autodl-tmp/Qwen3-VL-8B-Instruct", script_text)

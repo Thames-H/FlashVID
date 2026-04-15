@@ -11,6 +11,16 @@ from huggingface_hub import (
 
 DEFAULT_REPO_ID = "Qwen/Qwen3-VL-8B-Instruct"
 DEFAULT_LOCAL_DIRNAME = "Qwen3-VL-8B-Instruct"
+DEFAULT_AUTODL_PARENT = Path.home() / "autodl-tmp"
+
+
+def default_local_dir() -> Path:
+    override = os.environ.get("QWEN3_VL_MODEL_PATH")
+    if override:
+        return Path(override).expanduser()
+    if os.name != "nt":
+        return DEFAULT_AUTODL_PARENT / DEFAULT_LOCAL_DIRNAME
+    return Path(__file__).resolve().parents[1] / DEFAULT_LOCAL_DIRNAME
 
 
 def parse_args():
@@ -18,7 +28,7 @@ def parse_args():
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument(
         "--local-dir",
-        default=str(Path(__file__).resolve().parents[1] / DEFAULT_LOCAL_DIRNAME),
+        default=str(default_local_dir()),
     )
     return parser.parse_args()
 

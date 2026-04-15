@@ -1,1 +1,6 @@
 lmms-eval/logs/*
+.venv/
+Qwen3-VL-2B-Instruct/
+FlashVID_project_summary.pdf
+**/__pycache__/
+*.pyc

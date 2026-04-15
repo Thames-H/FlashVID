@@ -33,12 +33,12 @@ if not _has_qwen_vl:
 class Qwen3_VL(lmms):
     """
     Qwen3_VL Model
-    "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct"
+    "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct"
     """
 
     def __init__(
         self,
-        pretrained: str = "Qwen/Qwen3-VL-4B-Instruct",
+        pretrained: str = "Qwen/Qwen3-VL-8B-Instruct",
         device: Optional[str] = "cuda",
         device_map: Optional[str] = "auto",
         batch_size: Optional[Union[int, str]] = 1,

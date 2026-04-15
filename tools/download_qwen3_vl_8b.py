@@ -9,17 +9,16 @@ from huggingface_hub import (
 )
 
 
-DEFAULT_REPO_ID = "Qwen/Qwen3-VL-2B-Instruct"
-DEFAULT_LOCAL_DIRNAME = "Qwen3-VL-2B-Instruct"
+DEFAULT_REPO_ID = "Qwen/Qwen3-VL-8B-Instruct"
+DEFAULT_LOCAL_DIRNAME = "Qwen3-VL-8B-Instruct"
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument(
         "--local-dir",
-        default=str(
-            Path(__file__).resolve().parents[1] / DEFAULT_LOCAL_DIRNAME
-        ),
+        default=str(Path(__file__).resolve().parents[1] / DEFAULT_LOCAL_DIRNAME),
     )
     return parser.parse_args()
 

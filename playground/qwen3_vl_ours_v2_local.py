@@ -11,8 +11,8 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LMMS_EVAL_ROOT = REPO_ROOT / "lmms-eval"
-DEFAULT_REPO_ID = "Qwen/Qwen3-VL-2B-Instruct"
-DEFAULT_MODEL_DIRNAME = "Qwen3-VL-2B-Instruct"
+DEFAULT_REPO_ID = "Qwen/Qwen3-VL-8B-Instruct"
+DEFAULT_MODEL_DIRNAME = "Qwen3-VL-8B-Instruct"
 if str(LMMS_EVAL_ROOT) not in sys.path:
     sys.path.insert(0, str(LMMS_EVAL_ROOT))
 

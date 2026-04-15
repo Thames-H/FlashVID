@@ -1,7 +1,7 @@
-dataset_path: /workspace/video_general_data_cloud/qianjiawen/datasets/MME
+dataset_path: /root/autodl-tmp/benchmark/MME
 dataset_kwargs:
-  token: True
-  cache_dir: /workspace/video_general_data_cloud/qianjiawen/datasets/MME
+  token: False
+  cache_dir: /root/autodl-tmp/benchmark/MME
 task: "mme"
 test_split: test
 output_type: generate_until

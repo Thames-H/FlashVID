@@ -4,7 +4,11 @@ from tqdm import tqdm
 
 
 def gqa_process_docs(dataset: datasets.Dataset) -> datasets.Dataset:
-    gqa_raw_image_dataset = load_dataset("parquet", data_files="/workspace/video_general_data_cloud/qianjiawen/datasets/GQA/testdev_balanced_images/testdev-00000-of-00001.parquet", split="train")
+    gqa_raw_image_dataset = load_dataset(
+        "parquet",
+        data_files="/root/autodl-tmp/benchmark/GQA/testdev_balanced_images/testdev-00000-of-00001.parquet",
+        split="train",
+    )
     gqa_id2image = {}
     for row in tqdm(gqa_raw_image_dataset, desc="Loading GQA images"):
         gqa_id2image[row["id"]] = row["image"].convert("RGB")

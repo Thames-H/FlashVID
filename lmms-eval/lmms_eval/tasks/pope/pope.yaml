@@ -2,9 +2,9 @@ dataset_path: parquet
 dataset_kwargs:
   data_files:
     test:
-      - /workspace/video_general_data_cloud/qianjiawen/datasets/POPE/data/test-00000-of-00003.parquet
-      - /workspace/video_general_data_cloud/qianjiawen/datasets/POPE/data/test-00001-of-00003.parquet
-      - /workspace/video_general_data_cloud/qianjiawen/datasets/POPE/data/test-00002-of-00003.parquet
+      - /root/autodl-tmp/benchmark/POPE/data/test-00000-of-00003.parquet
+      - /root/autodl-tmp/benchmark/POPE/data/test-00001-of-00003.parquet
+      - /root/autodl-tmp/benchmark/POPE/data/test-00002-of-00003.parquet
 task: "pope"
 test_split: test
 output_type: generate_until

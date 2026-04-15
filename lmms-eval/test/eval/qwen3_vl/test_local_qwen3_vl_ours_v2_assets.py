@@ -80,3 +80,15 @@ class TestLocalQwen3VLOursV2Assets(TestCase):
         self.assertIn('"ocrbench"', script_text)
         self.assertIn("--model qwen3_vl_ours_v2", script_text)
         self.assertIn("autodl-tmp/Qwen3-VL-8B-Instruct", script_text)
+        self.assertIn('ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"', script_text)
+
+    def test_qwen3_benchmark_scripts_default_to_sdpa(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        flashvid_script = repo_root / "scripts" / "qwen3_vl.sh"
+        baseline_script = repo_root / "scripts" / "baseline" / "qwen3_vl.sh"
+
+        flashvid_text = flashvid_script.read_text(encoding="utf-8")
+        baseline_text = baseline_script.read_text(encoding="utf-8")
+
+        self.assertIn('ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"', flashvid_text)
+        self.assertIn('ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"', baseline_text)

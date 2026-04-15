@@ -1,8 +1,8 @@
 dataset_path: parquet
 dataset_kwargs:
   data_files:
-    testdev: /workspace/video_general_data_cloud/qianjiawen/datasets/GQA/testdev_balanced_instructions/testdev-00000-of-00001.parquet
-  cache_dir: /workspace/video_general_data_cloud/qianjiawen/datasets/GQA
+    testdev: /root/autodl-tmp/benchmark/GQA/testdev_balanced_instructions/testdev-00000-of-00001.parquet
+  cache_dir: /root/autodl-tmp/benchmark/GQA
   token: False
 task: "gqa"
 test_split: testdev

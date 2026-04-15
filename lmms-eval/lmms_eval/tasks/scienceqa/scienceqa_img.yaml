@@ -1,8 +1,8 @@
-dataset_path: lmms-lab/ScienceQA
+dataset_path: /root/autodl-tmp/benchmark/ScienceQA
 dataset_name: ScienceQA-IMG
 task: "scienceqa_img"
 dataset_kwargs:
-  token: True
+  token: False
 test_split: test
 output_type: generate_until
 doc_to_visual: !function utils.sqa_doc_to_visual

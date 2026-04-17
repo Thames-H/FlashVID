@@ -24,3 +24,22 @@ class TestQwen3VLMMTokImportSmoke(TestCase):
     def test_wrapper_loads_from_bundled_flashvid_package(self):
         wrapper = qwen3_vl_mmtok._load_mmtok_qwen3_wrapper()
         self.assertEqual(wrapper.__module__, "flashvid.mmtok.qwen.qwen3_vl_mmtok")
+
+    def test_question_extractor_accepts_batched_hf_messages(self):
+        question_text = qwen3_vl_mmtok._load_mmtok_qwen3_wrapper().__globals__[
+            "extract_question_from_messages"
+        ](
+            [
+                [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": "dummy"},
+                            {"type": "text", "text": "What is shown in the image?"},
+                        ],
+                    },
+                ]
+            ]
+        )
+        self.assertEqual(question_text, "What is shown in the image?")

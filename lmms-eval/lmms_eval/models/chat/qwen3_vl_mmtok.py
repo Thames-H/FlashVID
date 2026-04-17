@@ -8,23 +8,23 @@ from lmms_eval.api.registry import register_model
 from lmms_eval.models.chat.qwen3_vl import Qwen3_VL as Qwen3_VL_Chat
 
 
-def _resolve_local_mmtok_repo_root() -> Path:
+def _resolve_flashvid_repo_root() -> Path:
     repo_root = Path(__file__).resolve().parents[4]
-    candidate = repo_root / "reference_mmtok" / "MMTok"
-    if not candidate.exists():
+    flashvid_pkg = repo_root / "flashvid"
+    if not flashvid_pkg.exists():
         raise FileNotFoundError(
-            f"Local MMTok repo not found at {candidate}. "
-            "Expected the workspace copy under reference_mmtok/MMTok."
+            f"FlashVID package not found at {flashvid_pkg}. "
+            "Expected the workspace copy under flashvid/."
         )
-    return candidate
+    return repo_root
 
 
 def _load_mmtok_qwen3_wrapper():
-    repo_root = _resolve_local_mmtok_repo_root()
+    repo_root = _resolve_flashvid_repo_root()
     repo_root_str = str(repo_root)
     if repo_root_str not in sys.path:
         sys.path.insert(0, repo_root_str)
-    from mmtok.qwen import mmtok_qwen3_vl
+    from flashvid.mmtok.qwen import mmtok_qwen3_vl
 
     return mmtok_qwen3_vl
 
@@ -80,9 +80,9 @@ class Qwen3_VL_MMTok(Qwen3_VL_Chat):
             **kwargs,
         )
 
-        mmtok_repo_root = _resolve_local_mmtok_repo_root()
+        flashvid_repo_root = _resolve_flashvid_repo_root()
         eval_logger.info(
-            f"[Qwen3-VL-MMTok] Using local MMTok repo at {mmtok_repo_root}"
+            f"[Qwen3-VL-MMTok] Using bundled FlashVID MMTok from {flashvid_repo_root / 'flashvid' / 'mmtok'}"
         )
 
         if hasattr(self, "accelerator") and self.accelerator.num_processes > 1:

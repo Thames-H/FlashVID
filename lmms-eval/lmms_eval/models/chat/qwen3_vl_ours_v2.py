@@ -43,27 +43,23 @@ if not _has_qwen_vl:
 
 
 @torch.no_grad()
-def _compute_fes_scores(
-    attn_logits: torch.Tensor,
-    value_states: torch.Tensor,
-    visual_positions: torch.Tensor,
-    text_positions: torch.Tensor,
+def _compute_fes_scores_from_compact_inputs(
+    text_to_vis_logits: torch.Tensor,
+    visual_value_states: torch.Tensor,
     use_alpha: bool = True,
     use_deviation: bool = True,
 ) -> torch.Tensor:
-    n_vis = visual_positions.numel()
+    n_vis = visual_value_states.shape[2]
     if n_vis == 0:
-        return torch.empty(0, device=attn_logits.device)
+        return torch.empty(0, device=visual_value_states.device)
 
-    if text_positions.numel() == 0:
-        alpha = torch.ones(n_vis, device=attn_logits.device) / n_vis
+    if text_to_vis_logits.shape[2] == 0:
+        alpha = torch.ones(n_vis, device=visual_value_states.device) / n_vis
     else:
-        text_to_vis_logits = attn_logits[0].index_select(1, text_positions)
-        text_to_vis_logits = text_to_vis_logits.index_select(2, visual_positions)
         text_to_vis_alpha = F.softmax(text_to_vis_logits.float(), dim=-1)
-        alpha = text_to_vis_alpha.mean(dim=0).mean(dim=0)
+        alpha = text_to_vis_alpha.mean(dim=1).mean(dim=1)[0]
 
-    vis_values = value_states[0].index_select(1, visual_positions).float()
+    vis_values = visual_value_states[0].float()
     vis_values = vis_values.permute(1, 0, 2).reshape(n_vis, -1)
     pooled_value = (alpha.unsqueeze(-1) * vis_values).sum(dim=0)
     deviation = (vis_values - pooled_value.unsqueeze(0)).norm(dim=-1)
@@ -74,7 +70,28 @@ def _compute_fes_scores(
         return alpha
     if use_deviation:
         return deviation
-    return torch.ones(n_vis, device=alpha.device)
+    return torch.ones(n_vis, device=visual_value_states.device)
+
+
+@torch.no_grad()
+def _compute_fes_scores(
+    attn_logits: torch.Tensor,
+    value_states: torch.Tensor,
+    visual_positions: torch.Tensor,
+    text_positions: torch.Tensor,
+    use_alpha: bool = True,
+    use_deviation: bool = True,
+) -> torch.Tensor:
+    compact_logits = attn_logits.index_select(2, text_positions).index_select(
+        3, visual_positions
+    )
+    compact_values = value_states.index_select(2, visual_positions)
+    return _compute_fes_scores_from_compact_inputs(
+        text_to_vis_logits=compact_logits,
+        visual_value_states=compact_values,
+        use_alpha=use_alpha,
+        use_deviation=use_deviation,
+    )
 
 
 def _get_suffix_text_positions(
@@ -197,6 +214,13 @@ def _slice_attention_mask(attention_mask, keep_indices):
     return attention_mask
 
 
+def _slice_position_embeddings(position_embeddings, positions: torch.Tensor):
+    cos, sin = position_embeddings
+    if positions.numel() == 0:
+        return cos[:, :0, :], sin[:, :0, :]
+    return cos.index_select(1, positions), sin.index_select(1, positions)
+
+
 @torch.no_grad()
 def _forward_extract(
     language_model,
@@ -205,6 +229,8 @@ def _forward_extract(
     cache_position: torch.Tensor,
     num_layers: int,
     attn_layer: int,
+    text_positions: torch.Tensor,
+    visual_positions: torch.Tensor,
 ) -> tuple:
     hidden = inputs_embeds
 
@@ -225,9 +251,6 @@ def _forward_extract(
     )
     position_embeddings = language_model.rotary_emb(hidden, rope_position_ids)
 
-    attn_logits_out = None
-    value_states_out = None
-
     for layer_idx in range(num_layers):
         layer = language_model.layers[layer_idx]
 
@@ -236,66 +259,65 @@ def _forward_extract(
             hidden_normed = layer.input_layernorm(hidden)
 
             attn_module = layer.self_attn
-            bsz, q_len, _ = hidden_normed.size()
-            hidden_shape = (bsz, q_len, -1, attn_module.head_dim)
+            bsz = hidden_normed.size(0)
+            n_vis = visual_positions.numel()
 
-            query_states = attn_module.q_proj(hidden_normed).view(hidden_shape)
-            key_states = attn_module.k_proj(hidden_normed).view(hidden_shape)
-            value_states = attn_module.v_proj(hidden_normed).view(hidden_shape)
+            visual_hidden = hidden_normed.index_select(1, visual_positions)
+            visual_shape = (bsz, n_vis, -1, attn_module.head_dim)
+            key_states = attn_module.k_proj(visual_hidden).view(visual_shape)
+            value_states = attn_module.v_proj(visual_hidden).view(visual_shape)
 
-            query_states = attn_module.q_norm(query_states).transpose(1, 2)
             key_states = attn_module.k_norm(key_states).transpose(1, 2)
-            value_states = value_states.transpose(1, 2)
+            visual_value_states = value_states.transpose(1, 2)
 
-            cos, sin = position_embeddings
-            query_states, key_states = apply_rotary_pos_emb(
-                query_states, key_states, cos, sin
+            visual_cos, visual_sin = _slice_position_embeddings(
+                position_embeddings,
+                visual_positions,
             )
-
-            value_states_out = value_states.float().clone()
-
+            key_states, _ = apply_rotary_pos_emb(
+                key_states,
+                key_states,
+                visual_cos,
+                visual_sin,
+            )
             key_states_expanded = repeat_kv(
                 key_states, attn_module.num_key_value_groups
             )
-            value_states_expanded = repeat_kv(
-                value_states, attn_module.num_key_value_groups
-            )
 
-            attn_logits = torch.matmul(
-                query_states, key_states_expanded.transpose(2, 3)
-            ) * attn_module.scaling
+            if text_positions.numel() == 0:
+                text_to_vis_logits = hidden.new_empty(
+                    bsz,
+                    attn_module.num_heads,
+                    0,
+                    n_vis,
+                )
+            else:
+                text_hidden = hidden_normed.index_select(1, text_positions)
+                text_shape = (
+                    bsz,
+                    text_positions.numel(),
+                    -1,
+                    attn_module.head_dim,
+                )
+                query_states = attn_module.q_proj(text_hidden).view(text_shape)
+                query_states = attn_module.q_norm(query_states).transpose(1, 2)
 
-            causal_mask = torch.triu(
-                torch.ones(
-                    q_len,
-                    q_len,
-                    device=hidden.device,
-                    dtype=torch.bool,
-                ),
-                diagonal=1,
-            )
-            attn_logits = attn_logits.masked_fill(
-                causal_mask.unsqueeze(0).unsqueeze(0), float("-inf")
-            )
-            attn_logits_out = attn_logits.float().clone()
+                text_cos, text_sin = _slice_position_embeddings(
+                    position_embeddings,
+                    text_positions,
+                )
+                query_states, _ = apply_rotary_pos_emb(
+                    query_states,
+                    query_states,
+                    text_cos,
+                    text_sin,
+                )
 
-            attn_weights = F.softmax(
-                attn_logits, dim=-1, dtype=torch.float32
-            )
-            attn_output = torch.matmul(
-                attn_weights.to(value_states_expanded.dtype),
-                value_states_expanded,
-            )
-            attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_output = attn_output.reshape(bsz, q_len, -1)
-            attn_output = attn_module.o_proj(attn_output)
+                text_to_vis_logits = torch.matmul(
+                    query_states, key_states_expanded.transpose(2, 3)
+                ) * attn_module.scaling
 
-            hidden = residual + attn_output
-
-            residual = hidden
-            hidden = residual + layer.mlp(
-                layer.post_attention_layernorm(hidden)
-            )
+            return text_to_vis_logits, visual_value_states
         else:
             layer_out = layer(
                 hidden,
@@ -309,7 +331,7 @@ def _forward_extract(
             )
             hidden = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
-    return attn_logits_out, value_states_out
+    return None, None
 
 
 def _make_fetp_forward(
@@ -496,26 +518,27 @@ def _make_fetp_forward(
                     n_run = shallow_layers
                     extract_at = min(target_layer, shallow_layers - 1)
 
-                attn_logits, value_states = _forward_extract(
+                text_positions = _get_suffix_text_positions(
+                    input_ids[0],
+                    visual_positions,
+                    self.config,
+                )
+
+                text_to_vis_logits, visual_value_states = _forward_extract(
                     self.language_model,
                     inputs_embeds,
                     position_ids,
                     cache_position,
                     num_layers=n_run,
                     attn_layer=extract_at,
+                    text_positions=text_positions,
+                    visual_positions=visual_positions,
                 )
 
-                if attn_logits is not None and value_states is not None:
-                    text_positions = _get_suffix_text_positions(
-                        input_ids[0],
-                        visual_positions,
-                        self.config,
-                    )
-                    scores = _compute_fes_scores(
-                        attn_logits,
-                        value_states,
-                        visual_positions=visual_positions,
-                        text_positions=text_positions,
+                if text_to_vis_logits is not None and visual_value_states is not None:
+                    scores = _compute_fes_scores_from_compact_inputs(
+                        text_to_vis_logits=text_to_vis_logits,
+                        visual_value_states=visual_value_states,
                         use_alpha=use_alpha,
                         use_deviation=use_deviation,
                     )

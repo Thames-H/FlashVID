@@ -1,0 +1,3 @@
+[submodule "reference_mmtok/MMTok"]
+	path = reference_mmtok/MMTok
+	url = https://github.com/Thames-H/26nips-mmtok.git

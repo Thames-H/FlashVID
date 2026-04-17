@@ -93,9 +93,17 @@ def patch_qwen3_vl_processor_for_question_hook(processor, mmtok_model_instance):
     processor.apply_chat_template = patched_apply_chat_template
 
 
+def _iter_message_dicts(messages):
+    for item in messages:
+        if isinstance(item, dict):
+            yield item
+        elif isinstance(item, list):
+            yield from _iter_message_dicts(item)
+
+
 def extract_question_from_messages(messages):
     question_parts = []
-    for message in messages:
+    for message in _iter_message_dicts(messages):
         if message.get("role") != "user":
             continue
         content = message.get("content", [])

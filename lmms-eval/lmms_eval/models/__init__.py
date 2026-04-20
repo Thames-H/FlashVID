@@ -104,6 +104,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "qwen2_5_vl_mmtok": "Qwen2_5_VL_MMTok",
     "qwen2_5_vl_random": "Qwen2_5_VL_Random",
     "qwen2_5_vl_ours": "Qwen2_5_VL_Ours",
+    "llava_onevision_ours_v3": "LlavaOnevisionOursV3",
     "qwen2_5_vl_ours_v2": "Qwen2_5_VL_Ours_V2",
     "llava_hf_ours_v2": "LlavaHfOursV2",
     "thyme": "Thyme",

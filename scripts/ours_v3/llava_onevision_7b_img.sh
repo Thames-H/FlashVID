@@ -41,7 +41,7 @@ USE_DEVIATION="${USE_DEVIATION:-true}"
 
 # Model arguments.
 MAX_FRAMES_NUM="${MAX_FRAMES_NUM:-8}"
-ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"
+ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_frames_num=$MAX_FRAMES_NUM,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION"
 
 for retention_ratio in "${RETENTION_RATIOS[@]}"; do

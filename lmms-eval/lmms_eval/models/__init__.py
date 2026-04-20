@@ -97,6 +97,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "internvl3_5_ours_v3": "InternVL3_5_Ours_V3",
     "llava_hf": "LlavaHf",
     "llava_hf_mmtok": "LlavaHfMMTok",
+    "llava_onevision_mmtok": "LlavaOnevisionMMTok",
     "qwen3_vl": "Qwen3_VL",
     "qwen3_vl_mmtok": "Qwen3_VL_MMTok",
     "qwen3_vl_ours_v2": "Qwen3_VL_Ours_V2",

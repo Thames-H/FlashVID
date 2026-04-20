@@ -43,6 +43,14 @@ except Exception:
     eval_logger.debug("Transformers version does not support llava-onevision. Skipping.")
 
 
+def _get_module_dtype(module):
+    for parameter in module.parameters():
+        return parameter.dtype
+    for buffer in module.buffers():
+        return buffer.dtype
+    return None
+
+
 @register_model("llava_hf")
 class LlavaHf(lmms):
     """
@@ -86,7 +94,7 @@ class LlavaHf(lmms):
             self.device_map = f"cuda:{accelerator.local_process_index}"
         else:
             self._device = torch.device(device)
-            self.device_map = device_map
+            self.device_map = device_map if device_map else device
         if isinstance(dtype, str) and dtype != "auto":
             dtype = getattr(torch, dtype)
 
@@ -179,6 +187,26 @@ class LlavaHf(lmms):
     def world_size(self):
         return self._world_size
 
+    def _prepare_processor_inputs(self, inputs):
+        inputs = inputs.to(self._device)
+
+        vision_root = getattr(self.model, "model", self.model)
+        vision_tower = getattr(vision_root, "vision_tower", None)
+        vision_dtype = (
+            _get_module_dtype(vision_tower)
+            if vision_tower is not None
+            else self.model.dtype
+        )
+
+        if vision_dtype is None:
+            return inputs
+
+        for key in ("pixel_values", "pixel_values_videos"):
+            tensor = inputs.get(key)
+            if tensor is not None and torch.is_tensor(tensor) and tensor.is_floating_point():
+                inputs[key] = tensor.to(dtype=vision_dtype)
+        return inputs
+
     def tok_encode(self, string: str, left_truncate_len=None, add_special_tokens=None) -> List[int]:
         """ """
         add_special_tokens = False if add_special_tokens is None else add_special_tokens
@@ -223,7 +251,13 @@ class LlavaHf(lmms):
 
             formatted_contexts = [prompt]
             formatted_continuation = [prompt_and_continuation]
-            model_inputs = self._image_processor(text=formatted_continuation, images=visuals, return_tensors="pt").to(self._device, self.model.dtype)
+            model_inputs = self._prepare_processor_inputs(
+                self._image_processor(
+                    text=formatted_continuation,
+                    images=visuals,
+                    return_tensors="pt",
+                )
+            )
             labels = model_inputs["input_ids"].clone()
             contxt_id = self._image_processor(text=formatted_contexts, return_tensors="pt")["input_ids"]
             labels[:, : contxt_id.shape[1]] = -100
@@ -344,9 +378,21 @@ class LlavaHf(lmms):
                     pbar.update(1)
 
             if task_type == "image":
-                inputs = self._image_processor(images=visuals, text=text, return_tensors="pt").to(self._device, self.model.dtype)
+                inputs = self._prepare_processor_inputs(
+                    self._image_processor(
+                        images=visuals,
+                        text=text,
+                        return_tensors="pt",
+                    )
+                )
             elif task_type == "video":
-                inputs = self._image_processor(videos=visuals, text=text, return_tensors="pt").to(self._device, self.model.dtype)
+                inputs = self._prepare_processor_inputs(
+                    self._image_processor(
+                        videos=visuals,
+                        text=text,
+                        return_tensors="pt",
+                    )
+                )
 
             gen_kwargs["image_sizes"] = [visuals[idx].size for idx in range(len(visuals))]
             if "max_new_tokens" not in gen_kwargs:

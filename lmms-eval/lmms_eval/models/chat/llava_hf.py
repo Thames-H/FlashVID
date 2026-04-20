@@ -67,7 +67,14 @@ class LlavaHf(LlavaHfSimple):
 
             if len(videos) == 0:
                 videos = None
-            inputs = self._image_processor(images=visuals, videos=videos, text=text, return_tensors="pt").to(self._device, self.model.dtype)
+            inputs = self._prepare_processor_inputs(
+                self._image_processor(
+                    images=visuals,
+                    videos=videos,
+                    text=text,
+                    return_tensors="pt",
+                )
+            )
 
             # we assume all gen kwargs in the batch are the same
             # this is safe to assume because the `grouper` object ensures it.

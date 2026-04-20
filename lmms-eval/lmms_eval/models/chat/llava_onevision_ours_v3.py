@@ -72,6 +72,7 @@ def _compute_fes_scores_from_compact_inputs(
     visual_value_states: torch.Tensor,
     use_alpha: bool = True,
     use_deviation: bool = True,
+    text_chunk_size: Optional[int] = 32,
 ) -> torch.Tensor:
     n_vis = visual_value_states.shape[2]
     if n_vis == 0:
@@ -86,16 +87,48 @@ def _compute_fes_scores_from_compact_inputs(
     vis_values = visual_value_states[0].float()
     vis_values = vis_values.permute(1, 0, 2).reshape(n_vis, -1)
 
-    pooled_per_text = alpha_per_text @ vis_values
-    diff = vis_values.unsqueeze(0) - pooled_per_text.unsqueeze(1)
-    deviation_sq = diff.norm(dim=-1).pow(2)
-    scores = (alpha_per_text.pow(2) * deviation_sq).mean(dim=0).sqrt()
+    total_text_tokens = alpha_per_text.shape[0]
+    if text_chunk_size is None or text_chunk_size <= 0:
+        text_chunk_size = total_text_tokens
 
+    vis_norm_sq = vis_values.pow(2).sum(dim=-1)
+    alpha_sum = torch.zeros(n_vis, device=vis_values.device, dtype=torch.float32)
+    deviation_sum = torch.zeros(
+        n_vis, device=vis_values.device, dtype=torch.float32
+    )
+    score_sum = torch.zeros(n_vis, device=vis_values.device, dtype=torch.float32)
+
+    for start in range(0, total_text_tokens, text_chunk_size):
+        end = min(start + text_chunk_size, total_text_tokens)
+        alpha_chunk = alpha_per_text[start:end]
+        o_chunk = alpha_chunk @ vis_values
+        o_norm_sq = o_chunk.pow(2).sum(dim=-1, keepdim=True)
+        deviation_sq_chunk = (
+            vis_norm_sq.unsqueeze(0)
+            + o_norm_sq
+            - 2.0 * (o_chunk @ vis_values.T)
+        ).clamp_min_(0.0)
+
+        if use_alpha:
+            alpha_factor = alpha_chunk.pow(2)
+        else:
+            alpha_factor = torch.ones_like(deviation_sq_chunk)
+
+        if use_deviation:
+            deviation_factor = deviation_sq_chunk
+        else:
+            deviation_factor = torch.ones_like(deviation_sq_chunk)
+
+        score_sum += (alpha_factor * deviation_factor).sum(dim=0)
+        alpha_sum += alpha_chunk.sum(dim=0)
+        deviation_sum += deviation_sq_chunk.sqrt().sum(dim=0)
+
+    scores = (score_sum / total_text_tokens).sqrt()
     if use_alpha and use_deviation:
         return scores
 
-    alpha_mean = alpha_per_text.mean(dim=0)
-    deviation_mean = deviation_sq.sqrt().mean(dim=0)
+    alpha_mean = alpha_sum / total_text_tokens
+    deviation_mean = deviation_sum / total_text_tokens
     if use_alpha:
         return alpha_mean
     if use_deviation:
@@ -225,6 +258,7 @@ def _make_fetp_forward(
     target_layer: int,
     use_alpha: bool = True,
     use_deviation: bool = True,
+    text_chunk_size: Optional[int] = 32,
 ):
     def patched_forward(
         self,
@@ -430,6 +464,7 @@ def _make_fetp_forward(
                             visual_value_states=visual_value_states,
                             use_alpha=use_alpha,
                             use_deviation=use_deviation,
+                            text_chunk_size=text_chunk_size,
                         )
                         _, top_indices = scores.topk(num_keep)
                         keep_visual_local = top_indices.sort().values
@@ -527,6 +562,7 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         target_layer: int = 15,
         use_alpha: bool = True,
         use_deviation: bool = True,
+        text_chunk_size: Optional[int] = 32,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -552,7 +588,8 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             f"shallow_layers={shallow_layers}, "
             f"target_layer={target_layer}, "
             f"use_alpha={use_alpha}, "
-            f"use_deviation={use_deviation}"
+            f"use_deviation={use_deviation}, "
+            f"text_chunk_size={text_chunk_size}"
         )
 
         LlavaOnevisionModel.forward = _make_fetp_forward(
@@ -562,4 +599,5 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             target_layer=target_layer,
             use_alpha=use_alpha,
             use_deviation=use_deviation,
+            text_chunk_size=text_chunk_size,
         )

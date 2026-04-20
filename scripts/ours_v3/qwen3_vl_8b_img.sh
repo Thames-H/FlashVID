@@ -39,12 +39,13 @@ TARGET_LAYER="${TARGET_LAYER:-20}"
 USE_ALPHA="${USE_ALPHA:-true}"
 USE_DEVIATION="${USE_DEVIATION:-true}"
 TWO_STAGE="${TWO_STAGE:-false}"
+TEXT_CHUNK_SIZE="${TEXT_CHUNK_SIZE:-32}"
 STATS_OUTPUT_PATH="${STATS_OUTPUT_PATH:-}"
 
 # Model arguments.
 MAX_NUM_FRAMES="${MAX_NUM_FRAMES:-8}"
-ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"
-BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_num_frames=$MAX_NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE"
+ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
+BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_num_frames=$MAX_NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE"
 if [[ -n "$STATS_OUTPUT_PATH" ]]; then
     BASE_MODEL_ARGS="$BASE_MODEL_ARGS,stats_output_path=$STATS_OUTPUT_PATH"
 fi

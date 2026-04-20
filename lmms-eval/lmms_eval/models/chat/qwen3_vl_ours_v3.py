@@ -169,6 +169,7 @@ def _compute_fes_scores_from_compact_inputs(
     visual_value_states: torch.Tensor,
     use_alpha: bool = True,
     use_deviation: bool = True,
+    text_chunk_size: Optional[int] = 32,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute FETP-v3 scores from compact text-to-visual logits.
 
@@ -198,16 +199,45 @@ def _compute_fes_scores_from_compact_inputs(
     vis_values = visual_value_states[0].float()
     vis_values = vis_values.permute(1, 0, 2).reshape(n_vis, -1)
 
-    o_per_text = alpha_per_text @ vis_values
-    diff = vis_values.unsqueeze(0) - o_per_text.unsqueeze(1)
-    dev_sq = diff.norm(dim=-1).pow(2)
+    total_text_tokens = alpha_per_text.shape[0]
+    if text_chunk_size is None or text_chunk_size <= 0:
+        text_chunk_size = total_text_tokens
 
-    alpha_factor = alpha_per_text.pow(2) if use_alpha else torch.ones_like(dev_sq)
-    deviation_factor = dev_sq if use_deviation else torch.ones_like(dev_sq)
-    scores = (alpha_factor * deviation_factor).mean(dim=0).sqrt()
+    vis_norm_sq = vis_values.pow(2).sum(dim=-1)
+    alpha_sum = torch.zeros(n_vis, device=vis_values.device, dtype=torch.float32)
+    deviation_sum = torch.zeros(
+        n_vis, device=vis_values.device, dtype=torch.float32
+    )
+    score_sum = torch.zeros(n_vis, device=vis_values.device, dtype=torch.float32)
 
-    alpha_mean = alpha_per_text.mean(dim=0)
-    deviation_mean = dev_sq.sqrt().mean(dim=0)
+    for start in range(0, total_text_tokens, text_chunk_size):
+        end = min(start + text_chunk_size, total_text_tokens)
+        alpha_chunk = alpha_per_text[start:end]
+        o_chunk = alpha_chunk @ vis_values
+        o_norm_sq = o_chunk.pow(2).sum(dim=-1, keepdim=True)
+        dev_sq_chunk = (
+            vis_norm_sq.unsqueeze(0)
+            + o_norm_sq
+            - 2.0 * (o_chunk @ vis_values.T)
+        ).clamp_min_(0.0)
+
+        if use_alpha:
+            alpha_factor = alpha_chunk.pow(2)
+        else:
+            alpha_factor = torch.ones_like(dev_sq_chunk)
+
+        if use_deviation:
+            deviation_factor = dev_sq_chunk
+        else:
+            deviation_factor = torch.ones_like(dev_sq_chunk)
+
+        score_sum += (alpha_factor * deviation_factor).sum(dim=0)
+        alpha_sum += alpha_chunk.sum(dim=0)
+        deviation_sum += dev_sq_chunk.sqrt().sum(dim=0)
+
+    scores = (score_sum / total_text_tokens).sqrt()
+    alpha_mean = alpha_sum / total_text_tokens
+    deviation_mean = deviation_sum / total_text_tokens
     return scores, alpha_mean, deviation_mean
 
 
@@ -218,6 +248,7 @@ def _compute_fes_scores_from_visual_logits(
     visual_positions: torch.Tensor,
     use_alpha: bool = True,
     use_deviation: bool = True,
+    text_chunk_size: Optional[int] = 32,
 ) -> torch.Tensor:
     if visual_positions.numel() == 0:
         return torch.empty(0, device=value_states.device)
@@ -229,6 +260,7 @@ def _compute_fes_scores_from_visual_logits(
         visual_value_states=compact_values,
         use_alpha=use_alpha,
         use_deviation=use_deviation,
+        text_chunk_size=text_chunk_size,
     )
     return scores
 
@@ -347,11 +379,10 @@ def _forward_extract(
         layer = language_model.layers[layer_idx]
 
         if layer_idx == attn_layer:
-            residual = hidden
             hidden_normed = layer.input_layernorm(hidden)
 
             attn_module = layer.self_attn
-            bsz, seq_len, _ = hidden_normed.size()
+            bsz, _, _ = hidden_normed.size()
 
             visual_hidden = hidden_normed.index_select(1, visual_positions)
             visual_shape = (
@@ -414,70 +445,7 @@ def _forward_extract(
                     key_states_expanded.transpose(2, 3),
                 ) * attn_module.scaling
                 attn_logits_out = attn_logits_out.float().clone()
-
-            full_query_states = attn_module.q_proj(hidden_normed).view(
-                bsz, seq_len, -1, attn_module.head_dim
-            )
-            full_key_states = attn_module.k_proj(hidden_normed).view(
-                bsz, seq_len, -1, attn_module.head_dim
-            )
-            full_value_states = attn_module.v_proj(hidden_normed).view(
-                bsz, seq_len, -1, attn_module.head_dim
-            )
-
-            full_query_states = attn_module.q_norm(full_query_states).transpose(1, 2)
-            full_key_states = attn_module.k_norm(full_key_states).transpose(1, 2)
-            full_value_states = full_value_states.transpose(1, 2)
-
-            cos, sin = position_embeddings
-            full_query_states, full_key_states = apply_rotary_pos_emb(
-                full_query_states,
-                full_key_states,
-                cos,
-                sin,
-            )
-
-            full_key_states_expanded = repeat_kv(
-                full_key_states, attn_module.num_key_value_groups
-            )
-            full_value_states_expanded = repeat_kv(
-                full_value_states, attn_module.num_key_value_groups
-            )
-
-            full_attn_logits = torch.matmul(
-                full_query_states,
-                full_key_states_expanded.transpose(2, 3),
-            ) * attn_module.scaling
-            causal_mask = torch.triu(
-                torch.ones(
-                    seq_len,
-                    seq_len,
-                    device=hidden.device,
-                    dtype=torch.bool,
-                ),
-                diagonal=1,
-            )
-            full_attn_logits = full_attn_logits.masked_fill(
-                causal_mask.unsqueeze(0).unsqueeze(0),
-                float("-inf"),
-            )
-
-            full_attn_weights = F.softmax(
-                full_attn_logits, dim=-1, dtype=torch.float32
-            )
-            attn_output = torch.matmul(
-                full_attn_weights.to(full_value_states_expanded.dtype),
-                full_value_states_expanded,
-            )
-            attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_output = attn_output.reshape(bsz, seq_len, -1)
-            attn_output = attn_module.o_proj(attn_output)
-
-            hidden = residual + attn_output
-            residual = hidden
-            hidden = residual + layer.mlp(
-                layer.post_attention_layernorm(hidden)
-            )
+            return attn_logits_out, visual_value_states_out
         else:
             layer_out = layer(
                 hidden,
@@ -531,6 +499,7 @@ def _make_fetp_forward(
     use_alpha: bool = True,
     use_deviation: bool = True,
     two_stage: bool = False,
+    text_chunk_size: Optional[int] = 32,
 ):
     def patched_forward(
         self: Qwen3VLModel,
@@ -823,6 +792,7 @@ def _make_fetp_forward(
                             visual_value_states=visual_value_states,
                             use_alpha=use_alpha,
                             use_deviation=use_deviation,
+                            text_chunk_size=text_chunk_size,
                         )
                     )
                     _fes_distribution_stats.append(
@@ -972,6 +942,7 @@ def _make_fetp_anchor_forward(
     profile_reference_scoring: bool = False,
     reference_scoring_method: str = "shallow",
     two_stage: bool = False,
+    text_chunk_size: Optional[int] = 32,
 ):
     """Backward-compatible wrapper for the older anchor-layer API."""
     del anchor_weights
@@ -998,6 +969,7 @@ def _make_fetp_anchor_forward(
         use_alpha=use_alpha,
         use_deviation=use_deviation,
         two_stage=two_stage,
+        text_chunk_size=text_chunk_size,
     )
 
 
@@ -1034,6 +1006,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
         use_alpha: bool = True,
         use_deviation: bool = True,
         two_stage: bool = False,
+        text_chunk_size: Optional[int] = 32,
         stats_output_path: Optional[str] = None,
         # Backward-compatible legacy v3 arguments.
         anchor_layers: Optional[Union[str, Sequence[int]]] = None,
@@ -1090,6 +1063,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 profile_reference_scoring=profile_reference_scoring,
                 reference_scoring_method=reference_scoring_method,
                 two_stage=two_stage,
+                text_chunk_size=text_chunk_size,
             )
         else:
             Qwen3VLModel.forward = _make_fetp_forward(
@@ -1100,6 +1074,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 use_alpha=use_alpha,
                 use_deviation=use_deviation,
                 two_stage=two_stage,
+                text_chunk_size=text_chunk_size,
             )
 
         eval_logger.info(
@@ -1109,6 +1084,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             f"shallow_layers={shallow_layers}, "
             f"target_layer={target_layer}, "
             f"two_stage={two_stage}, "
+            f"text_chunk_size={text_chunk_size}, "
             f"stats_output_path={stats_output_path}"
         )
 

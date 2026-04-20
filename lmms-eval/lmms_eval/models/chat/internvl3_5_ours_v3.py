@@ -3,13 +3,20 @@ import warnings
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from loguru import logger as eval_logger
 from tqdm import tqdm
+from transformers.masking_utils import (
+    create_causal_mask,
+    create_sliding_window_causal_mask,
+)
 from transformers.models.internvl.modeling_internvl import (
     InternVLModel,
     InternVLModelOutputWithPast,
+)
+from transformers.models.qwen2.modeling_qwen2 import (
+    apply_rotary_pos_emb,
+    repeat_kv,
 )
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
@@ -161,6 +168,24 @@ def _tensor_summary(tensor: torch.Tensor) -> dict:
     }
 
 
+@torch.no_grad()
+def _diversity_prune(
+    features: torch.Tensor,
+    keep_ratio: float = 0.5,
+) -> torch.Tensor:
+    num_tokens = features.shape[0]
+    num_keep = max(1, int(num_tokens * keep_ratio))
+    if num_keep >= num_tokens:
+        return torch.arange(num_tokens, device=features.device)
+
+    feature_norm = F.normalize(features.float(), dim=-1)
+    similarity = feature_norm @ feature_norm.T
+    similarity.fill_diagonal_(0.0)
+    redundancy = similarity.mean(dim=-1)
+    _, keep_indices = redundancy.topk(num_keep, largest=False)
+    return keep_indices.sort().values
+
+
 def _summarize_pruning_stats(
     scoring_method: str,
     anchor_layers: Sequence[int],
@@ -207,101 +232,202 @@ def _slice_sequence_tensor(
     return tensor
 
 
+def _slice_position_embeddings(position_embeddings, positions: torch.Tensor):
+    cos, sin = position_embeddings
+    return cos.index_select(1, positions), sin.index_select(1, positions)
+
+
 @torch.no_grad()
-def _run_scoring_forward(
+def _compute_fes_scores_from_compact_inputs(
+    text_to_vis_logits: torch.Tensor,
+    visual_value_states: torch.Tensor,
+    use_alpha: bool = True,
+    use_deviation: bool = True,
+    text_chunk_size: Optional[int] = 32,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_visual = visual_value_states.shape[2]
+    if num_visual == 0:
+        empty = torch.empty(0, device=visual_value_states.device)
+        return empty, empty, empty
+
+    if text_to_vis_logits.shape[2] == 0:
+        alpha_per_text = torch.ones(
+            1,
+            num_visual,
+            device=visual_value_states.device,
+            dtype=torch.float32,
+        ) / num_visual
+    else:
+        text_to_vis_alpha = F.softmax(text_to_vis_logits.float(), dim=-1)
+        alpha_per_text = text_to_vis_alpha.mean(dim=1)[0]
+
+    vis_values = visual_value_states[0].float()
+    vis_values = vis_values.permute(1, 0, 2).reshape(num_visual, -1)
+
+    total_text_tokens = alpha_per_text.shape[0]
+    if text_chunk_size is None or text_chunk_size <= 0:
+        text_chunk_size = total_text_tokens
+
+    vis_norm_sq = vis_values.pow(2).sum(dim=-1)
+    alpha_sum = torch.zeros(
+        num_visual, device=vis_values.device, dtype=torch.float32
+    )
+    deviation_sum = torch.zeros(
+        num_visual, device=vis_values.device, dtype=torch.float32
+    )
+    score_sum = torch.zeros(
+        num_visual, device=vis_values.device, dtype=torch.float32
+    )
+
+    for start in range(0, total_text_tokens, text_chunk_size):
+        end = min(start + text_chunk_size, total_text_tokens)
+        alpha_chunk = alpha_per_text[start:end]
+        pooled_chunk = alpha_chunk @ vis_values
+        pooled_norm_sq = pooled_chunk.pow(2).sum(dim=-1, keepdim=True)
+        deviation_sq_chunk = (
+            vis_norm_sq.unsqueeze(0)
+            + pooled_norm_sq
+            - 2.0 * (pooled_chunk @ vis_values.T)
+        ).clamp_min_(0.0)
+
+        if use_alpha:
+            alpha_factor = alpha_chunk.pow(2)
+        else:
+            alpha_factor = torch.ones_like(deviation_sq_chunk)
+
+        if use_deviation:
+            deviation_factor = deviation_sq_chunk
+        else:
+            deviation_factor = torch.ones_like(deviation_sq_chunk)
+
+        score_sum += (alpha_factor * deviation_factor).sum(dim=0)
+        alpha_sum += alpha_chunk.sum(dim=0)
+        deviation_sum += deviation_sq_chunk.sqrt().sum(dim=0)
+
+    scores = (score_sum / total_text_tokens).sqrt()
+    alpha_mean = alpha_sum / total_text_tokens
+    deviation_mean = deviation_sum / total_text_tokens
+    return scores, alpha_mean, deviation_mean
+
+
+@torch.no_grad()
+def _forward_extract(
     language_model,
     inputs_embeds: torch.Tensor,
     attention_mask: Optional[torch.Tensor],
     position_ids: Optional[torch.Tensor],
-    num_run_layers: int,
-):
-    original_layers = language_model.layers
-    original_attn_impl = getattr(language_model.config, "_attn_implementation", None)
-
-    try:
-        if original_attn_impl is not None:
-            language_model.config._attn_implementation = "eager"
-        if num_run_layers < len(original_layers):
-            language_model.layers = nn.ModuleList(list(original_layers[:num_run_layers]))
-
-        return language_model(
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=None,
-            inputs_embeds=inputs_embeds,
-            use_cache=False,
-            output_attentions=True,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-    finally:
-        language_model.layers = original_layers
-        if original_attn_impl is not None:
-            language_model.config._attn_implementation = original_attn_impl
-
-
-@torch.no_grad()
-def _extract_value_states(
-    language_model,
-    hidden_states: torch.Tensor,
-    layer_idx: int,
-) -> torch.Tensor:
-    layer = language_model.layers[layer_idx]
-    hidden_normed = layer.input_layernorm(hidden_states)
-    attn_module = layer.self_attn
-    batch_size, seq_len, _ = hidden_normed.shape
-    value_states = attn_module.v_proj(hidden_normed).view(
-        batch_size,
-        seq_len,
-        -1,
-        attn_module.head_dim,
-    )
-    return value_states.transpose(1, 2).float().clone()
-
-
-@torch.no_grad()
-def _compute_fes_scores(
-    attention_weights: torch.Tensor,
-    value_states: torch.Tensor,
+    num_layers: int,
+    attn_layer: int,
     text_positions: torch.Tensor,
     visual_positions: torch.Tensor,
-    use_alpha: bool = True,
-    use_deviation: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    num_visual = visual_positions.numel()
-    if num_visual == 0:
-        empty = torch.empty(0, device=value_states.device)
-        return empty, empty, empty
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    hidden = inputs_embeds
 
-    if text_positions.numel() == 0:
-        scores = torch.ones(num_visual, device=value_states.device)
-        return scores, scores.clone(), scores.clone()
+    if not isinstance(causal_mask_mapping := attention_mask, dict):
+        mask_kwargs = {
+            "config": language_model.config,
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "cache_position": None,
+            "past_key_values": None,
+            "position_ids": position_ids,
+        }
+        causal_mask_mapping = {
+            "full_attention": create_causal_mask(**mask_kwargs),
+        }
+        if getattr(language_model, "has_sliding_layers", False):
+            causal_mask_mapping["sliding_attention"] = (
+                create_sliding_window_causal_mask(**mask_kwargs)
+            )
 
-    text_to_vis_attn = attention_weights.index_select(2, text_positions)
-    text_to_vis_attn = text_to_vis_attn.index_select(3, visual_positions).float()
-    denom = text_to_vis_attn.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-    alpha = text_to_vis_attn / denom
-    alpha_per_text = alpha.mean(dim=1)[0]
+    position_embeddings = language_model.rotary_emb(hidden, position_ids)
 
-    vis_values = value_states[0].index_select(1, visual_positions).float()
-    vis_values = vis_values.permute(1, 0, 2).reshape(num_visual, -1)
-    pooled_values = alpha_per_text @ vis_values
-    diff = vis_values.unsqueeze(0) - pooled_values.unsqueeze(1)
-    deviation = diff.norm(dim=-1)
+    for layer_idx in range(min(num_layers, len(language_model.layers))):
+        layer = language_model.layers[layer_idx]
 
-    alpha_mean = alpha_per_text.mean(dim=0)
-    deviation_mean = deviation.mean(dim=0)
+        if layer_idx == attn_layer:
+            hidden_normed = layer.input_layernorm(hidden)
+            attn_module = layer.self_attn
+            batch_size = hidden_normed.size(0)
+            num_visual = visual_positions.numel()
 
-    if use_alpha and use_deviation:
-        scores = ((alpha_per_text**2) * (deviation**2)).mean(dim=0).sqrt()
-    elif use_alpha:
-        scores = alpha_mean
-    elif use_deviation:
-        scores = deviation_mean
-    else:
-        scores = torch.ones(num_visual, device=value_states.device)
+            visual_hidden = hidden_normed.index_select(1, visual_positions)
+            visual_shape = (
+                batch_size,
+                num_visual,
+                -1,
+                attn_module.head_dim,
+            )
+            key_states = attn_module.k_proj(visual_hidden).view(
+                visual_shape
+            ).transpose(1, 2)
+            value_states = attn_module.v_proj(visual_hidden).view(
+                visual_shape
+            ).transpose(1, 2)
 
-    return scores, alpha_mean, deviation_mean
+            visual_cos, visual_sin = _slice_position_embeddings(
+                position_embeddings,
+                visual_positions,
+            )
+            key_states, _ = apply_rotary_pos_emb(
+                key_states,
+                key_states,
+                visual_cos,
+                visual_sin,
+            )
+            key_states_expanded = repeat_kv(
+                key_states,
+                attn_module.num_key_value_groups,
+            )
+
+            if text_positions.numel() == 0:
+                empty_logits = hidden.new_empty(
+                    batch_size,
+                    attn_module.num_heads,
+                    0,
+                    num_visual,
+                )
+                return empty_logits, value_states.float()
+
+            text_hidden = hidden_normed.index_select(1, text_positions)
+            text_shape = (
+                batch_size,
+                text_positions.numel(),
+                -1,
+                attn_module.head_dim,
+            )
+            query_states = attn_module.q_proj(text_hidden).view(
+                text_shape
+            ).transpose(1, 2)
+
+            text_cos, text_sin = _slice_position_embeddings(
+                position_embeddings,
+                text_positions,
+            )
+            query_states, _ = apply_rotary_pos_emb(
+                query_states,
+                query_states,
+                text_cos,
+                text_sin,
+            )
+            text_to_vis_logits = torch.matmul(
+                query_states,
+                key_states_expanded.transpose(2, 3),
+            ) * attn_module.scaling
+            return text_to_vis_logits.float(), value_states.float()
+
+        layer_type = language_model.config.layer_types[layer_idx]
+        layer_out = layer(
+            hidden,
+            attention_mask=causal_mask_mapping[layer_type],
+            position_ids=position_ids,
+            past_key_values=None,
+            use_cache=False,
+            position_embeddings=position_embeddings,
+        )
+        hidden = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+
+    return None, None
 
 
 def _make_fetp_forward(
@@ -315,6 +441,8 @@ def _make_fetp_forward(
     max_score_heads: Optional[int] = None,
     use_alpha: bool = True,
     use_deviation: bool = True,
+    two_stage: bool = False,
+    text_chunk_size: Optional[int] = 32,
 ):
     def patched_forward(
         self: InternVLModel,
@@ -357,6 +485,12 @@ def _make_fetp_forward(
             inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
             image_hidden_states = image_features
 
+        if position_ids is None:
+            position_ids = torch.arange(
+                inputs_embeds.shape[1],
+                device=inputs_embeds.device,
+            ).unsqueeze(0)
+
         if (
             pixel_values is not None
             and retention_ratio != 0
@@ -366,100 +500,202 @@ def _make_fetp_forward(
         ):
             visual_positions = torch.where(input_ids[0] == self.config.image_token_id)[0]
             num_visual_tokens = int(visual_positions.numel())
+            original_num_visual_tokens = num_visual_tokens
+            num_visual_tokens_after_stage1 = None
 
             if num_visual_tokens > 0:
-                if retention_ratio < 1.0:
-                    num_keep = max(1, int(num_visual_tokens * retention_ratio))
-                else:
-                    num_keep = max(1, min(int(retention_ratio), num_visual_tokens))
-
-                text_positions = _get_suffix_text_positions(
-                    input_ids[0],
-                    visual_positions,
-                    self.config.image_token_id,
-                )
-                (
-                    resolved_scoring_method,
-                    num_run_layers,
-                    extract_at,
-                ) = _resolve_scoring_plan(
-                    scoring_method=scoring_method,
-                    shallow_layers=shallow_layers,
-                    target_layer=target_layer,
-                    anchor_layers=anchor_layers,
-                    num_layers=len(self.language_model.layers),
-                )
-
-                scoring_start = time.perf_counter()
+                total_pruning_start = time.perf_counter()
                 try:
-                    scoring_outputs = _run_scoring_forward(
+                    if two_stage and num_visual_tokens > 1:
+                        layer0 = self.language_model.layers[0]
+                        hidden_normed = layer0.input_layernorm(inputs_embeds)
+                        visual_hidden = hidden_normed.index_select(1, visual_positions)
+                        stage1_values = layer0.self_attn.v_proj(visual_hidden)[0]
+                        stage1_keep = _diversity_prune(
+                            stage1_values,
+                            keep_ratio=0.5,
+                        )
+
+                        non_visual_positions = torch.where(
+                            input_ids[0] != self.config.image_token_id
+                        )[0]
+                        keep_indices = torch.cat(
+                            [
+                                non_visual_positions,
+                                visual_positions.index_select(0, stage1_keep),
+                            ],
+                            dim=0,
+                        ).sort().values
+
+                        hidden_size = inputs_embeds.shape[-1]
+                        gather_index = keep_indices.view(1, -1, 1).expand(
+                            inputs_embeds.shape[0],
+                            -1,
+                            hidden_size,
+                        )
+                        inputs_embeds = torch.gather(
+                            inputs_embeds,
+                            dim=1,
+                            index=gather_index,
+                        )
+                        input_ids = input_ids.index_select(1, keep_indices)
+                        attention_mask = _slice_sequence_tensor(attention_mask, keep_indices)
+                        position_ids = _slice_sequence_tensor(position_ids, keep_indices)
+
+                        visual_positions = torch.where(
+                            input_ids[0] == self.config.image_token_id
+                        )[0]
+                        num_visual_tokens = int(visual_positions.numel())
+                        num_visual_tokens_after_stage1 = num_visual_tokens
+
+                    if retention_ratio < 1.0:
+                        num_keep = max(
+                            1,
+                            int(original_num_visual_tokens * retention_ratio),
+                        )
+                    else:
+                        num_keep = max(
+                            1,
+                            min(int(retention_ratio), original_num_visual_tokens),
+                        )
+                    num_keep = min(num_keep, int(num_visual_tokens))
+
+                    text_positions = _get_suffix_text_positions(
+                        input_ids[0],
+                        visual_positions,
+                        self.config.image_token_id,
+                    )
+                    (
+                        resolved_scoring_method,
+                        num_run_layers,
+                        extract_at,
+                    ) = _resolve_scoring_plan(
+                        scoring_method=scoring_method,
+                        shallow_layers=shallow_layers,
+                        target_layer=target_layer,
+                        anchor_layers=anchor_layers,
+                        num_layers=len(self.language_model.layers),
+                    )
+
+                    scoring_start = time.perf_counter()
+                    text_to_vis_logits, visual_value_states = _forward_extract(
                         self.language_model,
                         inputs_embeds=inputs_embeds,
                         attention_mask=attention_mask,
                         position_ids=position_ids,
-                        num_run_layers=num_run_layers,
+                        num_layers=num_run_layers,
+                        attn_layer=extract_at,
+                        text_positions=text_positions,
+                        visual_positions=visual_positions,
                     )
+                    if (
+                        text_to_vis_logits is None
+                        or visual_value_states is None
+                    ):
+                        raise RuntimeError("compact attention extraction failed")
 
-                    attention_weights = scoring_outputs.attentions[extract_at]
-                    value_states = _extract_value_states(
-                        self.language_model,
-                        scoring_outputs.hidden_states[extract_at],
-                        extract_at,
-                    )
-
-                    coarse_text_positions = _truncate_text_positions(
-                        text_positions,
-                        max_score_text_tokens,
-                    )
-                    coarse_attention = attention_weights
-                    coarse_head_indices = _select_score_head_indices(
-                        attention_weights.shape[1],
-                        max_score_heads,
-                        attention_weights.device,
-                    )
-                    if coarse_head_indices is not None:
-                        coarse_attention = coarse_attention.index_select(1, coarse_head_indices)
-
-                    coarse_scores, _, _ = _compute_fes_scores(
-                        coarse_attention,
-                        value_states,
-                        coarse_text_positions,
-                        visual_positions,
-                        use_alpha=use_alpha,
-                        use_deviation=use_deviation,
-                    )
-
-                    candidate_local = _select_candidate_indices(
-                        coarse_scores,
-                        num_keep=num_keep,
-                        candidate_ratio=candidate_ratio,
-                    )
-                    candidate_visual_positions = visual_positions.index_select(0, candidate_local)
-
-                    if candidate_visual_positions.numel() != visual_positions.numel():
-                        final_scores, alpha_mean, deviation_mean = _compute_fes_scores(
-                            attention_weights,
-                            value_states,
-                            text_positions,
-                            candidate_visual_positions,
-                            use_alpha=use_alpha,
-                            use_deviation=use_deviation,
+                    if two_stage:
+                        final_scores, alpha_mean, deviation_mean = (
+                            _compute_fes_scores_from_compact_inputs(
+                                text_to_vis_logits=text_to_vis_logits,
+                                visual_value_states=visual_value_states,
+                                use_alpha=use_alpha,
+                                use_deviation=use_deviation,
+                                text_chunk_size=text_chunk_size,
+                            )
                         )
+                        keep_within_candidate = (
+                            final_scores.topk(num_keep).indices.sort().values
+                        )
+                        keep_visual_positions = visual_positions.index_select(
+                            0,
+                            keep_within_candidate,
+                        )
+                        score_query_tokens = int(text_positions.numel())
+                        score_heads = int(text_to_vis_logits.shape[1])
+                        candidate_size = int(num_visual_tokens)
                     else:
-                        final_scores, alpha_mean, deviation_mean = _compute_fes_scores(
-                            attention_weights,
-                            value_states,
+                        coarse_text_positions = _truncate_text_positions(
                             text_positions,
-                            visual_positions,
-                            use_alpha=use_alpha,
-                            use_deviation=use_deviation,
+                            max_score_text_tokens,
+                        )
+                        coarse_logits = text_to_vis_logits
+                        if coarse_text_positions.numel() != text_positions.numel():
+                            coarse_logits = coarse_logits[
+                                :,
+                                :,
+                                -coarse_text_positions.numel():,
+                                :,
+                            ]
+
+                        coarse_head_indices = _select_score_head_indices(
+                            text_to_vis_logits.shape[1],
+                            max_score_heads,
+                            text_to_vis_logits.device,
+                        )
+                        if coarse_head_indices is not None:
+                            coarse_logits = coarse_logits.index_select(
+                                1,
+                                coarse_head_indices,
+                            )
+
+                        coarse_scores, _, _ = (
+                            _compute_fes_scores_from_compact_inputs(
+                                text_to_vis_logits=coarse_logits,
+                                visual_value_states=visual_value_states,
+                                use_alpha=use_alpha,
+                                use_deviation=use_deviation,
+                                text_chunk_size=text_chunk_size,
+                            )
                         )
 
-                    keep_within_candidate = final_scores.topk(num_keep).indices.sort().values
-                    keep_visual_positions = candidate_visual_positions.index_select(
-                        0,
-                        keep_within_candidate,
-                    )
+                        candidate_local = _select_candidate_indices(
+                            coarse_scores,
+                            num_keep=num_keep,
+                            candidate_ratio=candidate_ratio,
+                        )
+                        candidate_visual_positions = visual_positions.index_select(
+                            0,
+                            candidate_local,
+                        )
+
+                        if candidate_visual_positions.numel() != visual_positions.numel():
+                            final_logits = text_to_vis_logits.index_select(
+                                3,
+                                candidate_local,
+                            )
+                            final_value_states = visual_value_states.index_select(
+                                2,
+                                candidate_local,
+                            )
+                        else:
+                            final_logits = text_to_vis_logits
+                            final_value_states = visual_value_states
+
+                        final_scores, alpha_mean, deviation_mean = (
+                            _compute_fes_scores_from_compact_inputs(
+                                text_to_vis_logits=final_logits,
+                                visual_value_states=final_value_states,
+                                use_alpha=use_alpha,
+                                use_deviation=use_deviation,
+                                text_chunk_size=text_chunk_size,
+                            )
+                        )
+                        keep_within_candidate = (
+                            final_scores.topk(num_keep).indices.sort().values
+                        )
+                        keep_visual_positions = candidate_visual_positions.index_select(
+                            0,
+                            keep_within_candidate,
+                        )
+                        score_query_tokens = int(coarse_text_positions.numel())
+                        score_heads = (
+                            text_to_vis_logits.shape[1]
+                            if coarse_head_indices is None
+                            else int(coarse_head_indices.numel())
+                        )
+                        candidate_size = int(candidate_visual_positions.numel())
+
                     keep_visual_positions = keep_visual_positions.sort().values
 
                     non_visual_positions = torch.where(input_ids[0] != self.config.image_token_id)[0]
@@ -485,22 +721,22 @@ def _make_fetp_forward(
                         image_hidden_states = inputs_embeds.index_select(1, kept_visual_indices)
 
                     scoring_time_s = time.perf_counter() - scoring_start
-                    score_heads = (
-                        attention_weights.shape[1]
-                        if coarse_head_indices is None
-                        else int(coarse_head_indices.numel())
-                    )
                     self._fetp_last_pruning_stats = _summarize_pruning_stats(
                         scoring_method=resolved_scoring_method,
                         anchor_layers=(extract_at,),
-                        num_visual_tokens=num_visual_tokens,
+                        num_visual_tokens=original_num_visual_tokens,
                         num_keep=num_keep,
                         scoring_time_s=scoring_time_s,
-                        total_pruning_time_s=scoring_time_s,
-                        candidate_size=int(candidate_visual_positions.numel()),
-                        score_query_tokens=int(coarse_text_positions.numel()),
+                        total_pruning_time_s=time.perf_counter() - total_pruning_start,
+                        candidate_size=candidate_size,
+                        score_query_tokens=score_query_tokens,
                         score_heads=score_heads,
                     )
+                    self._fetp_last_pruning_stats["pruning_two_stage"] = bool(two_stage)
+                    if num_visual_tokens_after_stage1 is not None:
+                        self._fetp_last_pruning_stats["pruning_num_visual_tokens_after_stage1"] = int(
+                            num_visual_tokens_after_stage1
+                        )
                     self._fetp_last_pruning_stats["pruning_score_summary_mean"] = float(
                         final_scores.float().mean().item()
                     )
@@ -515,13 +751,14 @@ def _make_fetp_forward(
                         f"retention_ratio={retention_ratio}, "
                         f"scoring_method={resolved_scoring_method}, "
                         f"target_layer={extract_at}, "
-                        f"candidate_ratio={candidate_ratio}, "
+                        f"two_stage={two_stage}, "
                         f"pruning_ms={self._fetp_last_pruning_stats['pruning_total_time_ms']:.2f}"
                     )
                 except Exception as exc:
                     self._fetp_last_pruning_stats = {
                         "pruning_error": str(exc),
-                        "pruning_num_visual_tokens": num_visual_tokens,
+                        "pruning_num_visual_tokens": original_num_visual_tokens,
+                        "pruning_two_stage": bool(two_stage),
                     }
                     eval_logger.warning(
                         f"InternVL3.5 FETP pruning skipped due to scoring failure: {exc}"
@@ -564,6 +801,8 @@ class InternVL3_5_Ours_V3(InternVLHf):
         max_score_heads: Optional[int] = None,
         use_alpha: bool = True,
         use_deviation: bool = True,
+        two_stage: bool = False,
+        text_chunk_size: Optional[int] = 32,
         profile_reference_scoring: bool = False,
         reference_scoring_method: str = "shallow",
         **kwargs,
@@ -581,9 +820,11 @@ class InternVL3_5_Ours_V3(InternVLHf):
             f"scoring_method={scoring_method}, "
             f"shallow_layers={shallow_layers}, "
             f"target_layer={target_layer}, "
+            f"two_stage={two_stage}, "
             f"candidate_ratio={candidate_ratio}, "
             f"max_score_text_tokens={max_score_text_tokens}, "
-            f"max_score_heads={max_score_heads}"
+            f"max_score_heads={max_score_heads}, "
+            f"text_chunk_size={text_chunk_size}"
         )
 
         InternVLModel.forward = _make_fetp_forward(
@@ -597,6 +838,8 @@ class InternVL3_5_Ours_V3(InternVLHf):
             max_score_heads=max_score_heads,
             use_alpha=use_alpha,
             use_deviation=use_deviation,
+            two_stage=two_stage,
+            text_chunk_size=text_chunk_size,
         )
 
     def generate_until(self, requests: List[Instance]) -> List[str]:

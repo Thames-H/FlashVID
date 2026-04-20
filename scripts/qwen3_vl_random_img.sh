@@ -37,7 +37,7 @@ fi
 
 # Model arguments.
 MAX_NUM_FRAMES="${MAX_NUM_FRAMES:-8}"
-ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"
+ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 BASE_MODEL_ARGS="pretrained=${PRETRAINED},max_num_frames=${MAX_NUM_FRAMES},attn_implementation=${ATTN_IMPLEMENTATION}"
 
 for retention_ratio in "${RETENTION_RATIOS[@]}"; do

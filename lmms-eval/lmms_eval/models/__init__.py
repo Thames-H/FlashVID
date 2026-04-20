@@ -94,6 +94,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "bagel_lmms_engine": "BagelLmmsEngine",
     "internvl_hf": "InternVLHf",
     "internvl_hf_mmtok": "InternVLHfMMTok",
+    "internvl3_5_ours_v3": "InternVL3_5_Ours_V3",
     "llava_hf": "LlavaHf",
     "llava_hf_mmtok": "LlavaHfMMTok",
     "qwen3_vl": "Qwen3_VL",

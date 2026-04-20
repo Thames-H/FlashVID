@@ -99,6 +99,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "qwen3_vl": "Qwen3_VL",
     "qwen3_vl_mmtok": "Qwen3_VL_MMTok",
     "qwen3_vl_ours_v2": "Qwen3_VL_Ours_V2",
+    "qwen3_vl_ours_v3": "Qwen3_VL_Ours_V3",
     "qwen3_vl_random": "Qwen3_VL_Random",
     "qwen2_5_vl": "Qwen2_5_VL",
     "qwen2_5_vl_mmtok": "Qwen2_5_VL_MMTok",

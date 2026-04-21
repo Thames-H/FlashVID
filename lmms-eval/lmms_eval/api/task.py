@@ -985,14 +985,23 @@ class ConfigurableTask(Task):
                 hf_home = os.path.expanduser(hf_home)
                 cache_dir = dataset_kwargs["cache_dir"]
                 cache_dir = os.path.join(hf_home, cache_dir)
+                local_load_from_disk = bool(
+                    dataset_kwargs.get("load_from_disk")
+                    and self.DATASET_PATH
+                    and os.path.exists(self.DATASET_PATH)
+                )
                 accelerator = Accelerator()
                 if accelerator.is_main_process:
                     force_download = dataset_kwargs.get("force_download", False)
                     force_unzip = dataset_kwargs.get("force_unzip", False)
                     revision = dataset_kwargs.get("revision", "main")
                     create_link = dataset_kwargs.get("create_link", False)
+                    cache_path = None
                     # If the user already has a cache dir, we skip download the zip files
-                    if not os.path.exists(cache_dir):
+                    if local_load_from_disk:
+                        zip_files = []
+                        tar_files = []
+                    elif not os.path.exists(cache_dir):
                         cache_path = snapshot_download(repo_id=self.DATASET_PATH, revision=revision, repo_type="dataset", force_download=force_download, etag_timeout=60)
                         zip_files = glob(os.path.join(cache_path, "**/*.zip"), recursive=True)
                         tar_files = glob(os.path.join(cache_path, "**/*.tar*"), recursive=True)

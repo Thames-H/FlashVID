@@ -26,6 +26,7 @@ from lmms_eval import utils
 from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.model_utils.gen_metrics import log_metrics
+from lmms_eval.models.chat.llava_hf import _prepare_llava_media_inputs
 from lmms_eval.models.simple.llava_hf import LlavaHf as LlavaHfSimple
 from lmms_eval.protocol import ChatMessages
 
@@ -566,17 +567,17 @@ class LlavaHfOursV2(LlavaHfSimple):
                 messages, tokenize=False, add_generation_prompt=True,
             )
 
-            if len(videos) == 0:
-                videos = None
+            visuals, videos, image_sizes = _prepare_llava_media_inputs(
+                visuals,
+                videos,
+            )
             inputs = self._image_processor(
                 images=visuals, videos=videos, text=text,
                 return_tensors="pt",
             ).to(self._device, self.model.dtype)
 
             gen_kwargs = all_gen_kwargs[0]
-            gen_kwargs["image_sizes"] = [
-                visuals[idx].size for idx in range(len(visuals))
-            ]
+            gen_kwargs["image_sizes"] = image_sizes
             if "max_new_tokens" not in gen_kwargs:
                 gen_kwargs["max_new_tokens"] = 1024
             if "temperature" not in gen_kwargs:

@@ -23,6 +23,13 @@ DEFAULT_VIDEO_TOKEN = "<video>"
 VICUNA_CHAT_TEMPLATE = "{% for message in messages %}{% if loop.index0 == 0 %}A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. USER: {{ message['content'] }} {% elif message['role'] == 'user' %}USER: {{ message['content'] }} {% else %} ASSISTANT: {{ message['content'] }}{{ eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ 'ASSISTANT:' }}{% endif %}"
 
 
+def _prepare_llava_media_inputs(visuals, videos):
+    normalized_visuals = visuals if visuals else None
+    normalized_videos = videos if videos else None
+    image_sizes = [visual.size for visual in visuals] if visuals else []
+    return normalized_visuals, normalized_videos, image_sizes
+
+
 @register_model("llava_hf_chat")
 class LlavaHf(LlavaHfSimple):
     is_simple = False
@@ -65,8 +72,10 @@ class LlavaHf(LlavaHfSimple):
             if self.accelerator.is_main_process and doc_id[0] % 100 == 0:
                 eval_logger.debug(f"Prompt for doc ID {doc_id[0]}:\n\n{text}\n")
 
-            if len(videos) == 0:
-                videos = None
+            visuals, videos, image_sizes = _prepare_llava_media_inputs(
+                visuals,
+                videos,
+            )
             inputs = self._prepare_processor_inputs(
                 self._image_processor(
                     images=visuals,
@@ -80,7 +89,7 @@ class LlavaHf(LlavaHfSimple):
             # this is safe to assume because the `grouper` object ensures it.
             gen_kwargs = all_gen_kwargs[0]
 
-            gen_kwargs["image_sizes"] = [visuals[idx].size for idx in range(len(visuals))]
+            gen_kwargs["image_sizes"] = image_sizes
             if "max_new_tokens" not in gen_kwargs:
                 gen_kwargs["max_new_tokens"] = 1024
             if "temperature" not in gen_kwargs:

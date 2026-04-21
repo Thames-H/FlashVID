@@ -1,6 +1,5 @@
 import os
 import re
-import sys
 from functools import partial
 from pathlib import Path
 
@@ -135,18 +134,31 @@ def videmme_process_docs_base(dataset: datasets.Dataset, type: str) -> datasets.
 videomme_process_docs_long = partial(videmme_process_docs_base, type="long")
 
 
+def _resolve_videomme_video_path(cache_dir, video_id):
+    candidate_dirs = [
+        os.path.join(cache_dir, "data"),
+        os.path.join(cache_dir, "data", "data"),
+        cache_dir,
+    ]
+    candidate_extensions = [".mp4", ".MP4", ".mkv"]
+    searched_paths = []
+
+    for candidate_dir in candidate_dirs:
+        for extension in candidate_extensions:
+            candidate_path = os.path.join(candidate_dir, f"{video_id}{extension}")
+            searched_paths.append(candidate_path)
+            if os.path.exists(candidate_path):
+                return candidate_path
+
+    raise SystemExit(
+        "video path does not exist for "
+        f"{video_id}, searched: {', '.join(searched_paths)}"
+    )
+
+
 def videomme_doc_to_visual(doc):
     cache_dir = os.path.join(base_cache_dir, cache_name)
-    video_path = doc["videoID"] + ".mp4"
-    video_path = os.path.join(cache_dir, "data", video_path)
-    if os.path.exists(video_path):
-        video_path = video_path
-    elif os.path.exists(video_path.replace("mp4", "MP4")):
-        video_path = video_path.replace("mp4", "MP4")
-    elif os.path.exists(video_path.replace("mp4", "mkv")):
-        video_path = video_path.replace("mp4", "mkv")
-    else:
-        sys.exit(f"video path:{video_path} does not exist, please check")
+    video_path = _resolve_videomme_video_path(cache_dir, doc["videoID"])
     return [video_path]
 
 
@@ -193,10 +205,8 @@ def videomme_doc_to_text_qwen3vl(doc, lmms_eval_specific_kwargs=None):
 
 def videomme_doc_to_text_subtitle(doc, lmms_eval_specific_kwargs=None):
     cache_dir = os.path.join(base_cache_dir, cache_name)
-    video_path = doc["videoID"] + ".mp4"
-    video_path = os.path.join(cache_dir, "data", video_path)
+    video_path = _resolve_videomme_video_path(cache_dir, doc["videoID"])
     subtitle_path = os.path.join(cache_dir, "subtitle", doc["videoID"] + ".srt")
-    video_path = os.path.join(cache_dir, video_path)
     if os.path.exists(subtitle_path):  # Denote have subtitle
         subtitle = open(subtitle_path).readlines()
     else:

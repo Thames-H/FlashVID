@@ -1,5 +1,6 @@
 """FETP-v3 for LLaVA-OneVision (HF format)."""
 
+import inspect
 from typing import Optional, Union
 
 import torch
@@ -12,6 +13,7 @@ from transformers.masking_utils import (
 from transformers.models.llava_onevision.modeling_llava_onevision import (
     LlavaOnevisionModel,
     LlavaOnevisionModelOutputWithPast,
+    image_size_to_num_patches,
 )
 from transformers.models.qwen2.modeling_qwen2 import (
     apply_rotary_pos_emb,
@@ -23,9 +25,257 @@ from lmms_eval.api.registry import register_model
 from .llava_hf import LlavaHf as LlavaHfChat
 
 
+def _call_mask_fn(
+    mask_fn,
+    *,
+    config,
+    inputs_embeds: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    position_ids: Optional[torch.Tensor],
+):
+    if position_ids is not None:
+        cache_position = (
+            position_ids[0]
+            if position_ids.ndim > 1
+            else position_ids
+        ).to(inputs_embeds.device)
+    else:
+        cache_position = torch.arange(
+            inputs_embeds.shape[1],
+            device=inputs_embeds.device,
+        )
+
+    kwargs = {
+        "config": config,
+        "attention_mask": attention_mask,
+        "cache_position": cache_position,
+        "past_key_values": None,
+        "position_ids": position_ids,
+    }
+    try:
+        parameters = inspect.signature(mask_fn).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    embed_arg_name = (
+        "inputs_embeds"
+        if "inputs_embeds" in parameters or "input_embeds" not in parameters
+        else "input_embeds"
+    )
+    kwargs[embed_arg_name] = inputs_embeds
+    return mask_fn(**kwargs)
+
+
+def _call_feature_extractor(
+    feature_fn,
+    *args,
+    return_dict: Optional[bool] = None,
+    **kwargs,
+):
+    try:
+        parameters = inspect.signature(feature_fn).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if return_dict is not None and (
+        "return_dict" in parameters or accepts_kwargs
+    ):
+        kwargs["return_dict"] = return_dict
+
+    return feature_fn(*args, **kwargs)
+
+
+def _filter_vision_tower_kwargs(vision_tower, kwargs) -> dict:
+    if not kwargs:
+        return {}
+
+    try:
+        parameters = inspect.signature(vision_tower.forward).parameters
+    except (TypeError, ValueError, AttributeError):
+        parameters = {}
+
+    reserved = {"output_hidden_states", "return_dict"}
+    return {
+        key: value
+        for key, value in kwargs.items()
+        if key not in reserved and key in parameters
+    }
+
+
+def _get_module_dtype(module) -> torch.dtype:
+    for parameter in module.parameters():
+        return parameter.dtype
+    for buffer in module.buffers():
+        return buffer.dtype
+    raise ValueError(f"Cannot infer dtype for module {module.__class__.__name__}")
+
+
+def _cast_tensor_for_module(tensor: torch.Tensor, module) -> torch.Tensor:
+    target_dtype = _get_module_dtype(module)
+    if tensor.dtype == target_dtype:
+        return tensor
+    return tensor.to(dtype=target_dtype)
+
+
 def _slice_position_embeddings(position_embeddings, positions: torch.Tensor):
     cos, sin = position_embeddings
     return cos.index_select(1, positions), sin.index_select(1, positions)
+
+
+def _extract_pooler_output(outputs):
+    pooler_output = getattr(outputs, "pooler_output", None)
+    if pooler_output is not None:
+        return pooler_output
+    if isinstance(outputs, torch.Tensor):
+        return outputs
+    if isinstance(outputs, (tuple, list)):
+        if len(outputs) > 1:
+            return outputs[1]
+        if outputs:
+            return outputs[0]
+    return outputs
+
+
+def _concat_token_features(features):
+    if isinstance(features, torch.Tensor):
+        return features
+    if isinstance(features, (tuple, list)):
+        tensors = tuple(features)
+        if not tensors:
+            raise ValueError("Expected non-empty image feature sequence")
+        return torch.cat(tensors, dim=0)
+    raise TypeError(f"Unsupported image feature type: {type(features)!r}")
+
+
+def _select_vision_features(
+    vision_outputs,
+    vision_feature_layer,
+    vision_feature_select_strategy: Optional[str],
+) -> torch.Tensor:
+    if isinstance(vision_feature_layer, int):
+        selected_feature = vision_outputs.hidden_states[vision_feature_layer]
+    else:
+        hidden_states_pool = [
+            vision_outputs.hidden_states[layer_idx]
+            for layer_idx in vision_feature_layer
+        ]
+        selected_feature = torch.cat(hidden_states_pool, dim=-1)
+
+    if vision_feature_select_strategy == "default":
+        selected_feature = selected_feature[:, 1:]
+    return selected_feature
+
+
+def _extract_image_features_compat(
+    model: LlavaOnevisionModel,
+    pixel_values: torch.Tensor,
+    image_sizes,
+    vision_feature_layer,
+    vision_feature_select_strategy: Optional[str],
+    vision_aspect_ratio: Optional[str],
+    batch_num_images=None,
+    **kwargs,
+) -> torch.Tensor:
+    vision_tower_kwargs = _filter_vision_tower_kwargs(
+        model.vision_tower,
+        kwargs,
+    )
+    if batch_num_images is None:
+        need_patching = [True] * len(image_sizes)
+    else:
+        need_patching = [n == 1 for n in batch_num_images for _ in range(n)]
+
+    image_num_patches = [
+        image_size_to_num_patches(
+            image_size=image_size,
+            grid_pinpoints=model.config.image_grid_pinpoints,
+            patch_size=model.config.vision_config.image_size,
+        )
+        if should_patch
+        else 1
+        for image_size, should_patch in zip(image_sizes, need_patching)
+    ]
+
+    if pixel_values.dim() == 5:
+        pixel_values = torch.cat(
+            [
+                pixel_value[:num_patch]
+                for pixel_value, num_patch in zip(pixel_values, image_num_patches)
+            ],
+            dim=0,
+        )
+    elif pixel_values.dim() != 4:
+        raise ValueError(
+            f"pixel_values of shape {pixel_values.shape}, expect to be 4D or 5D"
+        )
+
+    vision_outputs = model.vision_tower(
+        pixel_values,
+        output_hidden_states=True,
+        return_dict=True,
+        **vision_tower_kwargs,
+    )
+    selected_feature = _select_vision_features(
+        vision_outputs,
+        vision_feature_layer,
+        vision_feature_select_strategy,
+    )
+    selected_feature = _cast_tensor_for_module(
+        selected_feature,
+        model.multi_modal_projector,
+    )
+    image_features = model.multi_modal_projector(selected_feature)
+    image_features = torch.split(image_features, image_num_patches, dim=0)
+
+    image_features, _ = model.pack_image_features(
+        image_features,
+        image_sizes,
+        image_newline=model.image_newline.to(dtype=image_features[0].dtype),
+        vision_aspect_ratio=vision_aspect_ratio,
+    )
+    return image_features
+
+
+def _extract_video_features_compat(
+    model: LlavaOnevisionModel,
+    pixel_values: torch.Tensor,
+    vision_feature_layer,
+    vision_feature_select_strategy: Optional[str],
+    **kwargs,
+) -> torch.Tensor:
+    vision_tower_kwargs = _filter_vision_tower_kwargs(
+        model.vision_tower,
+        kwargs,
+    )
+    batch_size, frames, channels, height, width = pixel_values.shape
+    pixel_values = pixel_values.view(batch_size * frames, channels, height, width)
+    vision_outputs = model.vision_tower(
+        pixel_values,
+        output_hidden_states=True,
+        return_dict=True,
+        **vision_tower_kwargs,
+    )
+    selected_feature = _select_vision_features(
+        vision_outputs,
+        vision_feature_layer,
+        vision_feature_select_strategy,
+    )
+    selected_feature = _cast_tensor_for_module(
+        selected_feature,
+        model.multi_modal_projector,
+    )
+    video_features = model.multi_modal_projector(selected_feature)
+    video_features = model.apply_pooling(video_features)
+    video_features = video_features.reshape(
+        batch_size,
+        frames * video_features.shape[1],
+        -1,
+    )
+    return video_features
 
 
 def _slice_attention_mask(attention_mask, keep_indices: torch.Tensor):
@@ -67,11 +317,30 @@ def _get_suffix_text_positions(
 
 
 @torch.no_grad()
+def _diversity_prune(
+    features: torch.Tensor,
+    keep_ratio: float = 0.5,
+) -> torch.Tensor:
+    num_tokens = features.shape[0]
+    num_keep = max(1, int(num_tokens * keep_ratio))
+    if num_keep >= num_tokens:
+        return torch.arange(num_tokens, device=features.device)
+
+    feature_norm = F.normalize(features.float(), dim=-1)
+    similarity = feature_norm @ feature_norm.T
+    similarity.fill_diagonal_(0.0)
+    redundancy = similarity.mean(dim=-1)
+    _, keep_indices = redundancy.topk(num_keep, largest=False)
+    return keep_indices.sort().values
+
+
+@torch.no_grad()
 def _compute_fes_scores_from_compact_inputs(
     text_to_vis_logits: torch.Tensor,
     visual_value_states: torch.Tensor,
     use_alpha: bool = True,
     use_deviation: bool = True,
+    text_chunk_size: Optional[int] = 32,
 ) -> torch.Tensor:
     n_vis = visual_value_states.shape[2]
     if n_vis == 0:
@@ -86,16 +355,48 @@ def _compute_fes_scores_from_compact_inputs(
     vis_values = visual_value_states[0].float()
     vis_values = vis_values.permute(1, 0, 2).reshape(n_vis, -1)
 
-    pooled_per_text = alpha_per_text @ vis_values
-    diff = vis_values.unsqueeze(0) - pooled_per_text.unsqueeze(1)
-    deviation_sq = diff.norm(dim=-1).pow(2)
-    scores = (alpha_per_text.pow(2) * deviation_sq).mean(dim=0).sqrt()
+    total_text_tokens = alpha_per_text.shape[0]
+    if text_chunk_size is None or text_chunk_size <= 0:
+        text_chunk_size = total_text_tokens
 
+    vis_norm_sq = vis_values.pow(2).sum(dim=-1)
+    alpha_sum = torch.zeros(n_vis, device=vis_values.device, dtype=torch.float32)
+    deviation_sum = torch.zeros(
+        n_vis, device=vis_values.device, dtype=torch.float32
+    )
+    score_sum = torch.zeros(n_vis, device=vis_values.device, dtype=torch.float32)
+
+    for start in range(0, total_text_tokens, text_chunk_size):
+        end = min(start + text_chunk_size, total_text_tokens)
+        alpha_chunk = alpha_per_text[start:end]
+        o_chunk = alpha_chunk @ vis_values
+        o_norm_sq = o_chunk.pow(2).sum(dim=-1, keepdim=True)
+        deviation_sq_chunk = (
+            vis_norm_sq.unsqueeze(0)
+            + o_norm_sq
+            - 2.0 * (o_chunk @ vis_values.T)
+        ).clamp_min_(0.0)
+
+        if use_alpha:
+            alpha_factor = alpha_chunk.pow(2)
+        else:
+            alpha_factor = torch.ones_like(deviation_sq_chunk)
+
+        if use_deviation:
+            deviation_factor = deviation_sq_chunk
+        else:
+            deviation_factor = torch.ones_like(deviation_sq_chunk)
+
+        score_sum += (alpha_factor * deviation_factor).sum(dim=0)
+        alpha_sum += alpha_chunk.sum(dim=0)
+        deviation_sum += deviation_sq_chunk.sqrt().sum(dim=0)
+
+    scores = (score_sum / total_text_tokens).sqrt()
     if use_alpha and use_deviation:
         return scores
 
-    alpha_mean = alpha_per_text.mean(dim=0)
-    deviation_mean = deviation_sq.sqrt().mean(dim=0)
+    alpha_mean = alpha_sum / total_text_tokens
+    deviation_mean = deviation_sum / total_text_tokens
     if use_alpha:
         return alpha_mean
     if use_deviation:
@@ -114,29 +415,37 @@ def _forward_extract(
     text_positions: torch.Tensor,
     visual_positions: torch.Tensor,
 ):
-    hidden = inputs_embeds
+    hidden = _cast_tensor_for_module(
+        inputs_embeds,
+        language_model.layers[0].input_layernorm,
+    )
 
     if not isinstance(causal_mask_mapping := attention_mask, dict):
-        mask_kwargs = {
-            "config": language_model.config,
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": attention_mask,
-            "cache_position": None,
-            "past_key_values": None,
-            "position_ids": position_ids,
-        }
         causal_mask_mapping = {
-            "full_attention": create_causal_mask(**mask_kwargs),
+            "full_attention": _call_mask_fn(
+                create_causal_mask,
+                config=language_model.config,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            ),
         }
         if getattr(language_model, "has_sliding_layers", False):
             causal_mask_mapping["sliding_attention"] = (
-                create_sliding_window_causal_mask(**mask_kwargs)
+                _call_mask_fn(
+                    create_sliding_window_causal_mask,
+                    config=language_model.config,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                )
             )
 
     position_embeddings = language_model.rotary_emb(hidden, position_ids)
 
     for layer_idx in range(min(num_layers, len(language_model.layers))):
         layer = language_model.layers[layer_idx]
+        hidden = _cast_tensor_for_module(hidden, layer.input_layernorm)
 
         if layer_idx == attn_layer:
             hidden_normed = layer.input_layernorm(hidden)
@@ -145,11 +454,19 @@ def _forward_extract(
             n_vis = visual_positions.numel()
 
             visual_hidden = hidden_normed.index_select(1, visual_positions)
+            visual_hidden_for_k = _cast_tensor_for_module(
+                visual_hidden,
+                attn_module.k_proj,
+            )
+            visual_hidden_for_v = _cast_tensor_for_module(
+                visual_hidden,
+                attn_module.v_proj,
+            )
             visual_shape = (bsz, n_vis, -1, attn_module.head_dim)
-            key_states = attn_module.k_proj(visual_hidden).view(
+            key_states = attn_module.k_proj(visual_hidden_for_k).view(
                 visual_shape
             ).transpose(1, 2)
-            value_states = attn_module.v_proj(visual_hidden).view(
+            value_states = attn_module.v_proj(visual_hidden_for_v).view(
                 visual_shape
             ).transpose(1, 2)
 
@@ -157,6 +474,8 @@ def _forward_extract(
                 position_embeddings,
                 visual_positions,
             )
+            visual_cos = visual_cos.to(dtype=key_states.dtype)
+            visual_sin = visual_sin.to(dtype=key_states.dtype)
             key_states, _ = apply_rotary_pos_emb(
                 key_states,
                 key_states,
@@ -178,6 +497,10 @@ def _forward_extract(
                 return empty_logits, value_states.float()
 
             text_hidden = hidden_normed.index_select(1, text_positions)
+            text_hidden = _cast_tensor_for_module(
+                text_hidden,
+                attn_module.q_proj,
+            )
             text_shape = (
                 bsz,
                 text_positions.numel(),
@@ -192,6 +515,8 @@ def _forward_extract(
                 position_embeddings,
                 text_positions,
             )
+            text_cos = text_cos.to(dtype=query_states.dtype)
+            text_sin = text_sin.to(dtype=query_states.dtype)
             query_states, _ = apply_rotary_pos_emb(
                 query_states,
                 query_states,
@@ -225,6 +550,8 @@ def _make_fetp_forward(
     target_layer: int,
     use_alpha: bool = True,
     use_deviation: bool = True,
+    two_stage: bool = False,
+    text_chunk_size: Optional[int] = 32,
 ):
     def patched_forward(
         self,
@@ -276,16 +603,17 @@ def _make_fetp_forward(
         image_features = None
         n_image_tokens = None
         if pixel_values is not None:
-            image_features = self.get_image_features(
-                pixel_values,
-                image_sizes,
+            image_features = _extract_image_features_compat(
+                self,
+                pixel_values=pixel_values,
+                image_sizes=image_sizes,
                 vision_feature_layer=vision_feature_layer,
                 vision_feature_select_strategy=vision_feature_select_strategy,
                 vision_aspect_ratio=vision_aspect_ratio,
                 batch_num_images=batch_num_images,
-                return_dict=True,
-            ).pooler_output
-            image_features = torch.cat(image_features, dim=0).to(
+                **kwargs,
+            )
+            image_features = _concat_token_features(image_features).to(
                 inputs_embeds.device,
                 inputs_embeds.dtype,
             )
@@ -303,12 +631,13 @@ def _make_fetp_forward(
         video_features = None
         n_video_tokens = None
         if pixel_values_videos is not None:
-            video_features = self.get_video_features(
-                pixel_values_videos,
+            video_features = _extract_video_features_compat(
+                self,
+                pixel_values=pixel_values_videos,
                 vision_feature_layer=vision_feature_layer,
                 vision_feature_select_strategy=vision_feature_select_strategy,
-                return_dict=True,
-            ).pooler_output
+                **kwargs,
+            )
             image_newline = (
                 self.image_newline[None, None, :]
                 .repeat(video_features.shape[0], 1, 1)
@@ -378,104 +707,180 @@ def _make_fetp_forward(
                     visual_positions.numel() > 0
                     and visual_positions.numel() == n_visual_tokens
                 ):
-                    if retention_ratio < 1.0:
-                        num_keep = max(
-                            1,
-                            int(n_visual_tokens * retention_ratio),
-                        )
-                    else:
-                        num_keep = max(
-                            1,
-                            min(int(retention_ratio), n_visual_tokens),
-                        )
+                    original_input_ids = input_ids
+                    original_inputs_embeds = inputs_embeds
+                    original_position_ids = position_ids
+                    original_attention_mask = attention_mask
 
-                    if scoring_method == "full":
-                        n_run = len(self.language_model.layers)
-                        extract_at = target_layer
-                        if extract_at < 0:
-                            extract_at = n_run + extract_at
-                    else:
-                        n_run = min(
-                            max(1, shallow_layers),
-                            len(self.language_model.layers),
-                        )
-                        extract_at = target_layer
-                        if extract_at < 0:
-                            extract_at = n_run + extract_at
-                        extract_at = min(extract_at, n_run - 1)
-
-                    text_positions = _get_suffix_text_positions(
-                        input_ids[0],
-                        visual_positions,
-                        self.config,
-                    )
-
-                    text_to_vis_logits, visual_value_states = _forward_extract(
-                        self.language_model,
-                        inputs_embeds,
-                        attention_mask,
-                        position_ids,
-                        num_layers=n_run,
-                        attn_layer=extract_at,
-                        text_positions=text_positions,
-                        visual_positions=visual_positions,
-                    )
-
-                    if (
-                        text_to_vis_logits is not None
-                        and visual_value_states is not None
-                    ):
-                        scores = _compute_fes_scores_from_compact_inputs(
-                            text_to_vis_logits=text_to_vis_logits,
-                            visual_value_states=visual_value_states,
-                            use_alpha=use_alpha,
-                            use_deviation=use_deviation,
-                        )
-                        _, top_indices = scores.topk(num_keep)
-                        keep_visual_local = top_indices.sort().values
-                    else:
-                        eval_logger.warning(
-                            "FETP(LLaVA-OneVision): attention extraction "
-                            "failed, falling back to uniform selection."
-                        )
-                        step = n_visual_tokens / num_keep
-                        keep_visual_local = (
-                            torch.arange(
-                                num_keep,
-                                device=inputs_embeds.device,
+                    try:
+                        original_n_visual_tokens = n_visual_tokens
+                        if two_stage and n_visual_tokens > 1:
+                            layer0 = self.language_model.layers[0]
+                            stage1_hidden = _cast_tensor_for_module(
+                                inputs_embeds,
+                                layer0.input_layernorm,
                             )
-                            .float()
-                            .mul(step)
-                            .long()
+                            hidden_normed = layer0.input_layernorm(stage1_hidden)
+                            visual_hidden = hidden_normed.index_select(
+                                1,
+                                visual_positions,
+                            )
+                            visual_hidden = _cast_tensor_for_module(
+                                visual_hidden,
+                                layer0.self_attn.v_proj,
+                            )
+                            stage1_values = layer0.self_attn.v_proj(visual_hidden)[0]
+                            stage1_keep = _diversity_prune(
+                                stage1_values,
+                                keep_ratio=0.5,
+                            )
+
+                            non_visual_positions = torch.where(
+                                input_ids[0] != visual_token_id
+                            )[0]
+                            keep_global_indices = torch.cat(
+                                [
+                                    non_visual_positions,
+                                    visual_positions.index_select(0, stage1_keep),
+                                ],
+                                dim=0,
+                            ).sort().values
+
+                            hidden_size = inputs_embeds.shape[-1]
+                            gather_index = keep_global_indices.view(1, -1, 1).expand(
+                                inputs_embeds.shape[0],
+                                -1,
+                                hidden_size,
+                            )
+                            inputs_embeds = torch.gather(
+                                inputs_embeds,
+                                dim=1,
+                                index=gather_index,
+                            )
+                            input_ids = input_ids.index_select(
+                                1,
+                                keep_global_indices,
+                            )
+                            position_ids = position_ids[:, keep_global_indices]
+                            attention_mask = _slice_attention_mask(
+                                attention_mask,
+                                keep_global_indices,
+                            )
+
+                            visual_positions = torch.where(
+                                input_ids[0] == visual_token_id
+                            )[0]
+                            n_visual_tokens = int(visual_positions.numel())
+
+                        if retention_ratio < 1.0:
+                            num_keep = max(
+                                1,
+                                int(original_n_visual_tokens * retention_ratio),
+                            )
+                        else:
+                            num_keep = max(
+                                1,
+                                min(int(retention_ratio), original_n_visual_tokens),
+                            )
+                        num_keep = min(num_keep, n_visual_tokens)
+
+                        if scoring_method == "full":
+                            n_run = len(self.language_model.layers)
+                            extract_at = target_layer
+                            if extract_at < 0:
+                                extract_at = n_run + extract_at
+                        else:
+                            n_run = min(
+                                max(1, shallow_layers),
+                                len(self.language_model.layers),
+                            )
+                            extract_at = target_layer
+                            if extract_at < 0:
+                                extract_at = n_run + extract_at
+                            extract_at = min(extract_at, n_run - 1)
+
+                        text_positions = _get_suffix_text_positions(
+                            input_ids[0],
+                            visual_positions,
+                            self.config,
                         )
 
-                    non_visual_positions = torch.where(
-                        input_ids[0] != visual_token_id
-                    )[0]
-                    keep_global_indices = torch.cat(
-                        [
-                            non_visual_positions,
-                            visual_positions[keep_visual_local],
-                        ],
-                        dim=0,
-                    ).sort().values
+                        text_to_vis_logits, visual_value_states = _forward_extract(
+                            self.language_model,
+                            inputs_embeds,
+                            attention_mask,
+                            position_ids,
+                            num_layers=n_run,
+                            attn_layer=extract_at,
+                            text_positions=text_positions,
+                            visual_positions=visual_positions,
+                        )
 
-                    hidden_size = inputs_embeds.shape[-1]
-                    gather_index = keep_global_indices.view(1, -1, 1).expand(
-                        inputs_embeds.shape[0],
-                        -1,
-                        hidden_size,
-                    )
-                    inputs_embeds = torch.gather(
-                        inputs_embeds,
-                        dim=1,
-                        index=gather_index,
-                    )
-                    position_ids = position_ids[:, keep_global_indices]
-                    attention_mask = _slice_attention_mask(
-                        attention_mask,
-                        keep_global_indices,
-                    )
+                        if (
+                            text_to_vis_logits is not None
+                            and visual_value_states is not None
+                        ):
+                            scores = _compute_fes_scores_from_compact_inputs(
+                                text_to_vis_logits=text_to_vis_logits,
+                                visual_value_states=visual_value_states,
+                                use_alpha=use_alpha,
+                                use_deviation=use_deviation,
+                                text_chunk_size=text_chunk_size,
+                            )
+                            _, top_indices = scores.topk(num_keep)
+                            keep_visual_local = top_indices.sort().values
+                        else:
+                            eval_logger.warning(
+                                "FETP(LLaVA-OneVision): attention extraction "
+                                "failed, falling back to uniform selection."
+                            )
+                            step = n_visual_tokens / num_keep
+                            keep_visual_local = (
+                                torch.arange(
+                                    num_keep,
+                                    device=inputs_embeds.device,
+                                )
+                                .float()
+                                .mul(step)
+                                .long()
+                            )
+
+                        non_visual_positions = torch.where(
+                            input_ids[0] != visual_token_id
+                        )[0]
+                        keep_global_indices = torch.cat(
+                            [
+                                non_visual_positions,
+                                visual_positions[keep_visual_local],
+                            ],
+                            dim=0,
+                        ).sort().values
+
+                        hidden_size = inputs_embeds.shape[-1]
+                        gather_index = keep_global_indices.view(1, -1, 1).expand(
+                            inputs_embeds.shape[0],
+                            -1,
+                            hidden_size,
+                        )
+                        inputs_embeds = torch.gather(
+                            inputs_embeds,
+                            dim=1,
+                            index=gather_index,
+                        )
+                        position_ids = position_ids[:, keep_global_indices]
+                        attention_mask = _slice_attention_mask(
+                            attention_mask,
+                            keep_global_indices,
+                        )
+                    except Exception as exc:
+                        input_ids = original_input_ids
+                        inputs_embeds = original_inputs_embeds
+                        position_ids = original_position_ids
+                        attention_mask = original_attention_mask
+                        eval_logger.warning(
+                            "FETP(LLaVA-OneVision): pruning skipped due to "
+                            f"scoring failure: {exc}"
+                        )
                 else:
                     eval_logger.warning(
                         "FETP(LLaVA-OneVision): visual placeholder count does "
@@ -513,7 +918,7 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         pretrained: str = "llava-hf/llava-onevision-qwen2-7b-ov-hf",
         revision: str = "main",
         device: str = "cuda",
-        dtype: Optional[Union[str, torch.dtype]] = "auto",
+        dtype: Optional[Union[str, torch.dtype]] = "float16",
         batch_size: int = 1,
         trust_remote_code: Optional[bool] = False,
         attn_implementation: Optional[str] = None,
@@ -527,6 +932,8 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         target_layer: int = 15,
         use_alpha: bool = True,
         use_deviation: bool = True,
+        two_stage: bool = True,
+        text_chunk_size: Optional[int] = 32,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -552,7 +959,9 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             f"shallow_layers={shallow_layers}, "
             f"target_layer={target_layer}, "
             f"use_alpha={use_alpha}, "
-            f"use_deviation={use_deviation}"
+            f"use_deviation={use_deviation}, "
+            f"two_stage={two_stage}, "
+            f"text_chunk_size={text_chunk_size}"
         )
 
         LlavaOnevisionModel.forward = _make_fetp_forward(
@@ -562,4 +971,6 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             target_layer=target_layer,
             use_alpha=use_alpha,
             use_deviation=use_deviation,
+            two_stage=two_stage,
+            text_chunk_size=text_chunk_size,
         )

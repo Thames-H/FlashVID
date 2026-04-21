@@ -12,6 +12,16 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 LOG_SAMPLES_SUFFIX="${LOG_SAMPLES_SUFFIX:-qwen3_vl_ours_v3_8b_video}"
 OUTPUT_PATH="${OUTPUT_PATH:-./logs/ours_v3_qwen3_vl_8b_video}"
 
+DEVICE_MAP_DEFAULT=""
+if [[ "$NUM_PROCESSES" == "1" ]]; then
+    DEVICE_MAP_DEFAULT="auto"
+fi
+DEVICE_MAP="${DEVICE_MAP:-$DEVICE_MAP_DEFAULT}"
+if [[ "$NUM_PROCESSES" != "1" && "$DEVICE_MAP" == "auto" ]]; then
+    echo "Error: device_map=auto requires NUM_PROCESSES=1."
+    exit 1
+fi
+
 if [[ -n "${TASKS_CSV:-}" ]]; then
     IFS=',' read -r -a TASKS <<< "${TASKS_CSV}"
 else
@@ -42,6 +52,9 @@ STATS_OUTPUT_PATH="${STATS_OUTPUT_PATH:-}"
 MAX_NUM_FRAMES="${MAX_NUM_FRAMES:-32}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_num_frames=$MAX_NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE"
+if [[ -n "$DEVICE_MAP" ]]; then
+    BASE_MODEL_ARGS="$BASE_MODEL_ARGS,device_map=$DEVICE_MAP"
+fi
 if [[ -n "$STATS_OUTPUT_PATH" ]]; then
     BASE_MODEL_ARGS="$BASE_MODEL_ARGS,stats_output_path=$STATS_OUTPUT_PATH"
 fi

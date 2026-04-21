@@ -1,10 +1,10 @@
-dataset_path: longvideobench/LongVideoBench
+dataset_path: /root/autodl-fs/longvideobench/longvideobench_hf
 dataset_kwargs:
-  token: True
-  cache_dir: longvideobench
+  load_from_disk: True
+  cache_dir: /root/autodl-fs/longvideobench
   video: True
   force_download: False
-  local_files_only: False
+  local_files_only: True
   # From_YouTube: True
 task: longvideobench_val_v
 test_split: validation

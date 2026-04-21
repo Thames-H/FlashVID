@@ -3,7 +3,7 @@
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 # Evaluation benchmarks.
-TASKS=("videomme" "mvbench" "longvideobench_val_v" "egoschema")
+TASKS=("videomme" "longvideobench_val_v")
 
 # Pretrained model path.
 PRETRAINED="lmms-lab/llava-onevision-qwen2-7b-ov"

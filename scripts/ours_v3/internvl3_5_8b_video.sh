@@ -7,15 +7,15 @@ cd "${PROJECT_ROOT}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 NUM_PROCESSES="${NUM_PROCESSES:-4}"
-MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-18891}"
+MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-18893}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
-LOG_SAMPLES_SUFFIX="${LOG_SAMPLES_SUFFIX:-internvl3_5_ours_v3_8b_img}"
-OUTPUT_PATH="${OUTPUT_PATH:-./logs/ours_v3_internvl3_5_8b_img}"
+LOG_SAMPLES_SUFFIX="${LOG_SAMPLES_SUFFIX:-internvl3_5_ours_v3_8b_video}"
+OUTPUT_PATH="${OUTPUT_PATH:-./logs/ours_v3_internvl3_5_8b_video}"
 
 if [[ -n "${TASKS_CSV:-}" ]]; then
     IFS=',' read -r -a TASKS <<< "${TASKS_CSV}"
 else
-    TASKS=("gqa" "scienceqa_img" "mmbench_en" "mme" "pope" "ocrbench")
+    TASKS=("videomme" "longvideobench_val_v")
 fi
 
 AUTODL_MODEL_PATH="${HOME}/autodl-tmp/InternVL3_5-8B-HF"
@@ -52,7 +52,7 @@ MAX_SCORE_HEADS="${MAX_SCORE_HEADS:-0}"
 TEXT_CHUNK_SIZE="${TEXT_CHUNK_SIZE:-32}"
 
 MAX_PATCHES="${MAX_PATCHES:-12}"
-NUM_FRAMES="${NUM_FRAMES:-8}"
+NUM_FRAMES="${NUM_FRAMES:-32}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_patches=$MAX_PATCHES,num_frames=$NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,candidate_ratio=$CANDIDATE_RATIO,text_chunk_size=$TEXT_CHUNK_SIZE"
 
@@ -64,21 +64,20 @@ if [[ "$MAX_SCORE_HEADS" != "0" ]]; then
 fi
 
 for retention_ratio in "${RETENTION_RATIOS[@]}"; do
-    echo "Running InternVL3.5-8B FETP image benchmarks with retention_ratio=${retention_ratio}"
+    echo "Running InternVL3.5-8B FETP video benchmarks with retention_ratio=${retention_ratio}"
     MODEL_ARGS="$BASE_MODEL_ARGS,retention_ratio=${retention_ratio}"
     for task in "${TASKS[@]}"; do
         echo "Evaluating task: $task"
         accelerate launch \
-        --main_process_port "$MAIN_PROCESS_PORT" \
-        --num_processes "$NUM_PROCESSES" \
-        -m lmms_eval \
-        --model internvl3_5_ours_v3 \
-        --model_args "$MODEL_ARGS" \
-        --tasks "$task" \
-        --batch_size "$BATCH_SIZE" \
-        --log_samples \
-        --log_samples_suffix "$LOG_SAMPLES_SUFFIX" \
-        --output_path "$OUTPUT_PATH"
+            --main_process_port "$MAIN_PROCESS_PORT" \
+            --num_processes "$NUM_PROCESSES" \
+            -m lmms_eval \
+            --model internvl3_5_ours_v3 \
+            --model_args "$MODEL_ARGS" \
+            --tasks "$task" \
+            --batch_size "$BATCH_SIZE" \
+            --log_samples \
+            --log_samples_suffix "$LOG_SAMPLES_SUFFIX" \
+            --output_path "$OUTPUT_PATH"
     done
-    echo "Finished running with retention_ratio=${retention_ratio}"
 done

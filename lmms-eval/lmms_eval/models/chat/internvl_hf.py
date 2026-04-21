@@ -1,3 +1,5 @@
+import json
+import os
 import time
 import warnings
 from typing import List, Optional, Tuple
@@ -24,6 +26,33 @@ from lmms_eval.protocol import ChatMessages
 warnings.filterwarnings("ignore")
 
 from loguru import logger as eval_logger
+
+
+def _validate_internvl_hf_checkpoint(pretrained: str) -> None:
+    if not pretrained or not os.path.isdir(pretrained):
+        return
+
+    config_path = os.path.join(pretrained, "config.json")
+    if not os.path.isfile(config_path):
+        return
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            config = json.load(handle)
+    except Exception:
+        return
+
+    model_type = config.get("model_type")
+    if model_type == "internvl_chat":
+        raise ValueError(
+            "The checkpoint at "
+            f"'{pretrained}' is an original InternVL chat-format model "
+            "(model_type='internvl_chat'), but internvl_hf / "
+            "internvl3_5_ours_v3 expects the Hugging Face-format "
+            "InternVL checkpoint (for example "
+            "'OpenGVLab/InternVL3_5-8B-HF' or a local "
+            "'.../InternVL3_5-8B-HF' directory)."
+        )
 
 
 @register_model("internvl_hf_chat")
@@ -97,6 +126,8 @@ class InternVLHf(lmms):
         else:
             self._device = torch.device(device)
             self.device_map = device_map if device_map else device
+
+        _validate_internvl_hf_checkpoint(self.path)
 
         self._model = InternVLForConditionalGeneration.from_pretrained(
             self.path,

@@ -1,3 +1,4 @@
+import inspect
 import time
 import warnings
 from typing import Dict, List, Optional, Sequence, Tuple, Union
@@ -29,6 +30,47 @@ from lmms_eval.models.model_utils.gen_metrics import log_metrics
 from lmms_eval.protocol import ChatMessages
 
 warnings.filterwarnings("ignore")
+
+
+def _call_mask_fn(
+    mask_fn,
+    *,
+    config,
+    inputs_embeds: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    position_ids: Optional[torch.Tensor],
+):
+    if position_ids is not None:
+        cache_position = (
+            position_ids[0]
+            if position_ids.ndim > 1
+            else position_ids
+        ).to(inputs_embeds.device)
+    else:
+        cache_position = torch.arange(
+            inputs_embeds.shape[1],
+            device=inputs_embeds.device,
+        )
+
+    kwargs = {
+        "config": config,
+        "attention_mask": attention_mask,
+        "cache_position": cache_position,
+        "past_key_values": None,
+        "position_ids": position_ids,
+    }
+    try:
+        parameters = inspect.signature(mask_fn).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    embed_arg_name = (
+        "inputs_embeds"
+        if "inputs_embeds" in parameters or "input_embeds" not in parameters
+        else "input_embeds"
+    )
+    kwargs[embed_arg_name] = inputs_embeds
+    return mask_fn(**kwargs)
 
 
 def _normalize_anchor_layers(
@@ -237,6 +279,20 @@ def _slice_position_embeddings(position_embeddings, positions: torch.Tensor):
     return cos.index_select(1, positions), sin.index_select(1, positions)
 
 
+def _extract_pooler_output(outputs):
+    pooler_output = getattr(outputs, "pooler_output", None)
+    if pooler_output is not None:
+        return pooler_output
+    if isinstance(outputs, torch.Tensor):
+        return outputs
+    if isinstance(outputs, (tuple, list)):
+        if len(outputs) > 1:
+            return outputs[1]
+        if outputs:
+            return outputs[0]
+    return outputs
+
+
 @torch.no_grad()
 def _compute_fes_scores_from_compact_inputs(
     text_to_vis_logits: torch.Tensor,
@@ -324,20 +380,24 @@ def _forward_extract(
     hidden = inputs_embeds
 
     if not isinstance(causal_mask_mapping := attention_mask, dict):
-        mask_kwargs = {
-            "config": language_model.config,
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": attention_mask,
-            "cache_position": None,
-            "past_key_values": None,
-            "position_ids": position_ids,
-        }
         causal_mask_mapping = {
-            "full_attention": create_causal_mask(**mask_kwargs),
+            "full_attention": _call_mask_fn(
+                create_causal_mask,
+                config=language_model.config,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            ),
         }
         if getattr(language_model, "has_sliding_layers", False):
             causal_mask_mapping["sliding_attention"] = (
-                create_sliding_window_causal_mask(**mask_kwargs)
+                _call_mask_fn(
+                    create_sliding_window_causal_mask,
+                    config=language_model.config,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                )
             )
 
     position_embeddings = language_model.rotary_emb(hidden, position_ids)
@@ -470,12 +530,14 @@ def _make_fetp_forward(
 
         image_hidden_states = None
         if pixel_values is not None:
-            image_features = self.get_image_features(
-                pixel_values=pixel_values,
-                vision_feature_layer=vision_feature_layer,
-                vision_feature_select_strategy=vision_feature_select_strategy,
-                return_dict=True,
-            ).pooler_output
+            image_features = _extract_pooler_output(
+                self.get_image_features(
+                    pixel_values=pixel_values,
+                    vision_feature_layer=vision_feature_layer,
+                    vision_feature_select_strategy=vision_feature_select_strategy,
+                    return_dict=True,
+                )
+            )
             image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
             special_image_mask = self.get_placeholder_mask(
                 input_ids,
@@ -801,7 +863,7 @@ class InternVL3_5_Ours_V3(InternVLHf):
         max_score_heads: Optional[int] = None,
         use_alpha: bool = True,
         use_deviation: bool = True,
-        two_stage: bool = False,
+        two_stage: bool = True,
         text_chunk_size: Optional[int] = 32,
         profile_reference_scoring: bool = False,
         reference_scoring_method: str = "shallow",

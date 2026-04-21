@@ -40,8 +40,9 @@ USE_ALPHA="${USE_ALPHA:-true}"
 USE_DEVIATION="${USE_DEVIATION:-true}"
 
 # Model arguments.
-ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
-BASE_MODEL_ARGS="pretrained=$PRETRAINED,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION"
+MAX_NUM_FRAMES="${MAX_NUM_FRAMES:-8}"
+ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"
+BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_num_frames=$MAX_NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION"
 
 for retention_ratio in "${RETENTION_RATIOS[@]}"; do
     echo "Running Qwen3-VL-8B-Instruct FETP image benchmarks with retention_ratio=${retention_ratio}"

@@ -25,7 +25,10 @@ from transformers.utils import TransformersKwargs
 from lmms_eval import utils
 from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
-from lmms_eval.models.chat.internvl_hf import InternVLHf
+from lmms_eval.models.chat.internvl_hf import (
+    InternVLHf,
+    _prepare_internvl_media_inputs,
+)
 from lmms_eval.models.model_utils.gen_metrics import log_metrics
 from lmms_eval.protocol import ChatMessages
 
@@ -960,8 +963,10 @@ class InternVL3_5_Ours_V3(InternVLHf):
             if self.accelerator.is_main_process and doc_id[0] % 100 == 0:
                 eval_logger.debug(f"Prompt for doc ID {doc_id[0]}:\n\n{text}\n")
 
-            if len(videos) == 0:
-                videos = None
+            visuals, videos, image_sizes = _prepare_internvl_media_inputs(
+                visuals,
+                videos,
+            )
             inputs = self.processor(
                 images=visuals,
                 videos=videos,

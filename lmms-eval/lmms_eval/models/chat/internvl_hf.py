@@ -55,6 +55,17 @@ def _validate_internvl_hf_checkpoint(pretrained: str) -> None:
         )
 
 
+def _prepare_internvl_media_inputs(visuals, videos):
+    normalized_visuals = visuals if visuals else None
+    normalized_videos = videos if videos else None
+    image_sizes = (
+        [visual.size for visual in visuals]
+        if visuals
+        else []
+    )
+    return normalized_visuals, normalized_videos, image_sizes
+
+
 @register_model("internvl_hf_chat")
 class InternVLHf(lmms):
     """
@@ -292,8 +303,10 @@ class InternVLHf(lmms):
             if self.accelerator.is_main_process and doc_id[0] % 100 == 0:
                 eval_logger.debug(f"Prompt for doc ID {doc_id[0]}:\n\n{text}\n")
 
-            if len(videos) == 0:
-                videos = None
+            visuals, videos, image_sizes = _prepare_internvl_media_inputs(
+                visuals,
+                videos,
+            )
             inputs = self.processor(
                 images=visuals,
                 videos=videos,
@@ -307,7 +320,7 @@ class InternVLHf(lmms):
             # this is safe to assume because the `grouper` object ensures it.
             gen_kwargs = all_gen_kwargs[0]
 
-            gen_kwargs["image_sizes"] = [visuals[idx].size for idx in range(len(visuals))]
+            gen_kwargs["image_sizes"] = image_sizes
             if "max_new_tokens" not in gen_kwargs:
                 gen_kwargs["max_new_tokens"] = 1024
             if "temperature" not in gen_kwargs:

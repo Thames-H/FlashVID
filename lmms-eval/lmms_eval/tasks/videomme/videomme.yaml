@@ -1,7 +1,7 @@
-dataset_path: /workspace/video_general_data_cloud/qianjiawen/datasets/Video-MME/videomme_hf
+dataset_path: /root/autodl-fs/videomme/videomme_hf
 dataset_kwargs:
   load_from_disk: True
-  cache_dir: /workspace/video_general_data_cloud/qianjiawen/datasets/Video-MME/videomme
+  cache_dir: /root/autodl-fs/videomme/videomme
   video: True
   # From_YouTube: True
 task: videomme

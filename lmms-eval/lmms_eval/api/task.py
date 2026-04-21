@@ -788,27 +788,76 @@ class ConfigurableTask(Task):
                     eval_logger.warning(f'Both target_delimiter "{self.config.target_delimiter}" and target choice: "{choice}" do not have whitespace, ignore if the language you are evaluating on does not require/use whitespace')
 
     def _prepare_model_specific_config(self):
+        def _iter_model_name_fallbacks(model_name: Optional[str]):
+            if not model_name:
+                return
+
+            current = model_name
+            seen = {model_name}
+            while True:
+                fallback = re.sub(
+                    r"_(?:ours_v\d+|ours|mmtok|random|original|chat)$",
+                    "",
+                    current,
+                )
+                if not fallback or fallback == current or fallback in seen:
+                    break
+                seen.add(fallback)
+                yield fallback
+                current = fallback
+
+        def _resolve_model_config_entry(config_map):
+            if config_map is None:
+                return None
+            if self.model_name in config_map:
+                return copy.deepcopy(config_map[self.model_name])
+
+            # Allow optimized chat variants to inherit benchmark-specific
+            # settings from their base model family, e.g. qwen3_vl_ours_v3
+            # -> qwen3_vl for VideoMME prompt formatting.
+            for fallback in _iter_model_name_fallbacks(self.model_name):
+                if fallback in config_map:
+                    return copy.deepcopy(config_map[fallback])
+            return None
+
         self.lmms_eval_specific_kwargs = self.config.lmms_eval_specific_kwargs
         if self.lmms_eval_specific_kwargs is not None:
-            if self.model_name in self.lmms_eval_specific_kwargs:
-                self.lmms_eval_specific_kwargs = self.lmms_eval_specific_kwargs[self.model_name]
+            resolved_kwargs = _resolve_model_config_entry(
+                self.lmms_eval_specific_kwargs
+            )
+            if resolved_kwargs is not None:
+                self.lmms_eval_specific_kwargs = resolved_kwargs
             elif "default" in self.lmms_eval_specific_kwargs:
-                self.lmms_eval_specific_kwargs.update(self.lmms_eval_specific_kwargs.get("default", {}))
+                self.lmms_eval_specific_kwargs = copy.deepcopy(
+                    self.lmms_eval_specific_kwargs.get("default", {})
+                )
             elif "dataset" in self.lmms_eval_specific_kwargs:
-                self.lmms_eval_specific_kwargs.update(self.lmms_eval_specific_kwargs.get("dataset", {}))
+                self.lmms_eval_specific_kwargs = copy.deepcopy(
+                    self.lmms_eval_specific_kwargs.get("dataset", {})
+                )
 
         self.model_specific_target_kwargs = self.config.model_specific_target_kwargs
         if self.model_specific_target_kwargs is not None:
-            if self.model_name in self.model_specific_target_kwargs:
-                self.model_specific_target_kwargs = self.model_specific_target_kwargs[self.model_name]
+            resolved_target_kwargs = _resolve_model_config_entry(
+                self.model_specific_target_kwargs
+            )
+            if resolved_target_kwargs is not None:
+                self.model_specific_target_kwargs = resolved_target_kwargs
             else:
-                self.model_specific_target_kwargs = self.model_specific_target_kwargs.get("default", None)
+                self.model_specific_target_kwargs = copy.deepcopy(
+                    self.model_specific_target_kwargs.get("default", None)
+                )
         self.model_specific_generation_kwargs = self.config.model_specific_generation_kwargs
         if self.model_specific_generation_kwargs is not None:
-            if self.model_name in self.model_specific_generation_kwargs:
-                self.model_specific_generation_kwargs = self.model_specific_generation_kwargs[self.model_name]
+            resolved_generation_kwargs = _resolve_model_config_entry(
+                self.model_specific_generation_kwargs
+            )
+            if resolved_generation_kwargs is not None:
+                self.model_specific_generation_kwargs = resolved_generation_kwargs
             else:
-                self.model_specific_generation_kwargs = self.model_specific_generation_kwargs.get("default", {})
+                self.model_specific_generation_kwargs = copy.deepcopy(
+                    self.model_specific_generation_kwargs.get("default", {})
+                )
 
             self.config.generation_kwargs.update(self.model_specific_generation_kwargs)
 

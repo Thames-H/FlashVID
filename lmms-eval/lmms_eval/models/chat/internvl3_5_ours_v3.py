@@ -976,22 +976,33 @@ class InternVL3_5_Ours_V3(InternVLHf):
         )
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
-        res: List[str] = []
+        self.load_cache()
+        cached_responses, pending_requests = self.partition_loaded_cache_requests(
+            requests
+        )
+        if not pending_requests:
+            return self.merge_cached_and_generated_responses(
+                requests,
+                cached_responses,
+                {},
+            )
+
+        generated_responses: Dict[Tuple[str, int], str] = {}
 
         def _collate(x):
-            return x[2], x[2]
+            return x.args[2], x.args[2]
 
         re_ords = utils.Collator(
-            [reg.args for reg in requests],
+            pending_requests,
             _collate,
-            group_fn=lambda x: x[2],
+            group_fn=lambda x: x.args[2],
             grouping=True,
         )
         chunks = re_ords.get_batched(n=self.batch_size, batch_fn=None)
         num_iters = (
-            len(requests) // self.batch_size
-            if len(requests) % self.batch_size == 0
-            else len(requests) // self.batch_size + 1
+            len(pending_requests) // self.batch_size
+            if len(pending_requests) % self.batch_size == 0
+            else len(pending_requests) // self.batch_size + 1
         )
         pbar = tqdm(total=num_iters, disable=(self.rank != 0), desc="Model Responding")
         e2e_latency = 0.0
@@ -1001,7 +1012,10 @@ class InternVL3_5_Ours_V3(InternVLHf):
         pruning_metric_last: Dict[str, Union[str, int, float]] = {}
 
         for chunk in chunks:
-            ctx, doc_to_messages, all_gen_kwargs, doc_id, task, split = zip(*chunk)
+            chunk_requests = list(chunk)
+            ctx, doc_to_messages, all_gen_kwargs, doc_id, task, split = zip(
+                *[req.args for req in chunk_requests]
+            )
             task = task[0]
             split = split[0]
             chat_messages = [doc_to_messages[0](self.task_dict[task][split][ids]) for ids in doc_id]
@@ -1089,13 +1103,12 @@ class InternVL3_5_Ours_V3(InternVLHf):
             if self.accelerator.is_main_process and doc_id[0] % 100 == 0:
                 eval_logger.debug(f"Generated text for doc ID {doc_id[0]}:\n\n{answers}\n")
 
-            for answer in answers:
-                res.append(answer)
+            for req, answer in zip(chunk_requests, answers):
+                generated_responses[(req.task_name, req.doc_id)] = answer
+                self.add_request_response_to_cache(req, answer)
                 self.cache_hook.add_partial("generate_until", (text, gen_kwargs), answer)
 
             pbar.update(1)
-
-        res = re_ords.get_original(res)
 
         metric_dict = {
             "total_tokens": total_tokens,
@@ -1113,4 +1126,8 @@ class InternVL3_5_Ours_V3(InternVLHf):
         log_metrics(**metric_dict)
 
         pbar.close()
-        return res
+        return self.merge_cached_and_generated_responses(
+            requests,
+            cached_responses,
+            generated_responses,
+        )

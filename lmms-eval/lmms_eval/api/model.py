@@ -222,6 +222,54 @@ class lmms(abc.ABC):
         eval_logger.info(f"Not cached {len(not_cached_requests)} requests")
         return responses, not_cached_requests
 
+    def partition_loaded_cache_requests(self, requests: List[Instance]) -> Tuple[Dict[Tuple[str, Any], str], List[Instance]]:
+        """
+        Partition requests into cached vs. pending using the already loaded in-memory cache.
+
+        Returns:
+            cached_responses: mapping of (task_name, doc_id) -> response
+            pending_requests: requests that still need model inference
+        """
+        cached_responses: Dict[Tuple[str, Any], str] = {}
+        pending_requests: List[Instance] = []
+
+        for request in requests:
+            task_cache = self.cache_dict.get(request.task_name, {})
+            if request.doc_id in task_cache:
+                cached_responses[(request.task_name, request.doc_id)] = task_cache[request.doc_id]
+            else:
+                pending_requests.append(request)
+
+        return cached_responses, pending_requests
+
+    def merge_cached_and_generated_responses(
+        self,
+        requests: List[Instance],
+        cached_responses: Dict[Tuple[str, Any], str],
+        generated_responses: Dict[Tuple[str, Any], str],
+    ) -> List[str]:
+        """
+        Rebuild a full response list in the original request order from cached and newly generated outputs.
+        """
+        merged: List[str] = []
+        for request in requests:
+            key = (request.task_name, request.doc_id)
+            if key in generated_responses:
+                merged.append(generated_responses[key])
+                continue
+            if key in cached_responses:
+                merged.append(cached_responses[key])
+                continue
+
+            task_cache = self.cache_dict.get(request.task_name, {})
+            if request.doc_id in task_cache:
+                merged.append(task_cache[request.doc_id])
+                continue
+
+            raise KeyError(f"Missing cached/generated response for task={request.task_name}, doc_id={request.doc_id}")
+
+        return merged
+
     @abc.abstractmethod
     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
         """Compute log-likelihood of generating a continuation from a context.

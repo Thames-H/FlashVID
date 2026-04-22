@@ -1173,22 +1173,33 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         _fes_distribution_stats.clear()
-        res = []
+        self.load_cache()
+        cached_responses, pending_requests = self.partition_loaded_cache_requests(
+            requests
+        )
+        if not pending_requests:
+            return self.merge_cached_and_generated_responses(
+                requests,
+                cached_responses,
+                {},
+            )
+
+        generated_responses = {}
 
         def _collate(x):
-            return x[0], x[0]
+            return x.args[0], x.args[0]
 
         re_ords = utils.Collator(
-            [reg.args for reg in requests],
+            pending_requests,
             _collate,
-            group_fn=lambda x: x[2],
+            group_fn=lambda x: x.args[2],
             grouping=True,
         )
         chunks = re_ords.get_batched(n=self.batch_size, batch_fn=None)
         num_iters = (
-            len(requests) // self.batch_size
-            if len(requests) % self.batch_size == 0
-            else len(requests) // self.batch_size + 1
+            len(pending_requests) // self.batch_size
+            if len(pending_requests) % self.batch_size == 0
+            else len(pending_requests) // self.batch_size + 1
         )
         pbar = tqdm(
             total=num_iters,
@@ -1202,6 +1213,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
         pruning_metric_last: Dict[str, Union[str, int, float, bool]] = {}
 
         for chunk in chunks:
+            chunk_requests = list(chunk)
             (
                 ctx,
                 doc_to_messages,
@@ -1209,7 +1221,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 doc_id,
                 task,
                 split,
-            ) = zip(*chunk)
+            ) = zip(*[req.args for req in chunk_requests])
             chat_messages = [
                 doc_to_messages[idx](self.task_dict[task][split][ids])
                 for idx, (ids, task, split) in enumerate(
@@ -1346,9 +1358,10 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             e2e_latency += end_time - start_time
             total_tokens += sum(len(ids) for ids in generated_ids_trimmed)
 
-            for ans, context in zip(answers, texts):
+            for req, ans, context in zip(chunk_requests, answers, texts):
                 clean_ans = parse_reasoning_model_answer(ans)
-                res.append(clean_ans)
+                generated_responses[(req.task_name, req.doc_id)] = clean_ans
+                self.add_request_response_to_cache(req, clean_ans)
                 self.cache_hook.add_partial(
                     "generate_until",
                     (context, gen_kwargs),
@@ -1360,8 +1373,6 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 eval_logger.debug(f"Model Clean Response: {clean_ans}")
 
             pbar.update(1)
-
-        res = re_ords.get_original(res)
 
         avg_speed = total_tokens / e2e_latency if e2e_latency > 0 else 0
         additional_metrics: Dict[str, Union[int, float, str, bool]] = {
@@ -1435,4 +1446,8 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             )
 
         pbar.close()
-        return res
+        return self.merge_cached_and_generated_responses(
+            requests,
+            cached_responses,
+            generated_responses,
+        )

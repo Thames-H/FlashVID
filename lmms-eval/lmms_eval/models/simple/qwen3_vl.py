@@ -220,7 +220,12 @@ class Qwen3_VL(lmms):
         return new_list
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
-        res = []
+        self.load_cache()
+        cached_responses, pending_requests = self.partition_loaded_cache_requests(requests)
+        if not pending_requests:
+            return self.merge_cached_and_generated_responses(requests, cached_responses, {})
+
+        generated_responses = {}
 
         def _collate(x):
             # the negative sign on len(toks) sorts descending - this has a few advantages:
@@ -229,17 +234,18 @@ class Qwen3_VL(lmms):
             #   padded context length. this is useful to simplify the batching logic and more importantly to make
             #   automatic adaptive batches much much easier to implement
             # - any OOMs will happen right away rather than near the end
-            toks = self.tokenizer.encode(x[0])
-            return -len(toks), x[0]
+            toks = self.tokenizer.encode(x.args[0])
+            return -len(toks), x.args[0]
 
-        pbar = tqdm(total=len(requests), disable=(self.rank != 0), desc="Model Responding")
+        pbar = tqdm(total=len(pending_requests), disable=(self.rank != 0), desc="Model Responding")
         # we group requests by their generation_kwargs,
         # so that we don't try to execute e.g. greedy sampling and temp=0.8 sampling
         # in the same batch.
-        re_ords = utils.Collator([reg.args for reg in requests], _collate, grouping=True)
+        re_ords = utils.Collator(pending_requests, _collate, grouping=True)
         chunks = re_ords.get_batched(n=self.batch_size, batch_fn=None)
         for chunk in chunks:
-            contexts, all_gen_kwargs, doc_to_visual, doc_id, task, split = zip(*chunk)
+            chunk_requests = list(chunk)
+            contexts, all_gen_kwargs, doc_to_visual, doc_id, task, split = zip(*[req.args for req in chunk_requests])
             task = task[0]
             split = split[0]
             visual_list = [doc_to_visual[0](self.task_dict[task][split][ids]) for ids in doc_id]
@@ -412,20 +418,19 @@ class Qwen3_VL(lmms):
                         ans = ans.split(term)[0]
                 answers[i] = ans
 
-            for ans, context in zip(answers, contexts):
+            for req, ans, context in zip(chunk_requests, answers, contexts):
                 clean_ans = parse_reasoning_model_answer(ans)
-                res.append(clean_ans)
+                generated_responses[(req.task_name, req.doc_id)] = clean_ans
+                self.add_request_response_to_cache(req, clean_ans)
                 self.cache_hook.add_partial("generate_until", (context, gen_kwargs), clean_ans)
                 pbar.update(1)
 
                 # eval_logger.debug(f"Question: {context}")
                 # eval_logger.debug(f"Model Raw Response: {ans}")
                 # eval_logger.debug(f"Model Clean Response: {clean_ans}")
-            # reorder this group of results back to original unsorted form
-        res = re_ords.get_original(res)
 
         pbar.close()
-        return res
+        return self.merge_cached_and_generated_responses(requests, cached_responses, generated_responses)
 
     def generate_until_multi_round(self, requests) -> List[str]:
         raise NotImplementedError("TODO: Implement multi-round generation")

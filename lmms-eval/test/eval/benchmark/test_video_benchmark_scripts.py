@@ -76,3 +76,37 @@ class TestVideoBenchmarkScripts(TestCase):
             self.assertIn('if [[ "$NUM_PROCESSES" == "1" ]]; then', text)
             self.assertIn('DEVICE_MAP="${DEVICE_MAP:-$DEVICE_MAP_DEFAULT}"', text)
             self.assertIn('device_map=$DEVICE_MAP', text)
+
+    def test_internvl_ours_v3_video_script_uses_safe_default_budget(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        path = repo_root / "scripts" / "ours_v3" / "internvl3_5_8b_video.sh"
+        text = path.read_text(encoding="utf-8")
+
+        self.assertIn('CANDIDATE_RATIO="${CANDIDATE_RATIO:-0.25}"', text)
+        self.assertIn('MAX_SCORE_TEXT_TOKENS="${MAX_SCORE_TEXT_TOKENS:-8}"', text)
+        self.assertIn('MAX_SCORE_HEADS="${MAX_SCORE_HEADS:-8}"', text)
+        self.assertIn('TEXT_CHUNK_SIZE="${TEXT_CHUNK_SIZE:-16}"', text)
+        self.assertIn('MAX_PATCHES="${MAX_PATCHES:-4}"', text)
+        self.assertIn('NUM_FRAMES="${NUM_FRAMES:-8}"', text)
+        self.assertIn('ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"', text)
+
+    def test_ours_v3_video_scripts_enable_resume_cache_by_default(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        paths = [
+            repo_root / "scripts" / "ours_v3" / "qwen3_vl_8b_video.sh",
+            repo_root / "scripts" / "ours_v3" / "qwen3_vl_8b_video_original.sh",
+            repo_root / "scripts" / "ours_v3" / "internvl3_5_8b_video.sh",
+        ]
+
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(
+                'export LMMS_EVAL_USE_CACHE="${LMMS_EVAL_USE_CACHE:-True}"',
+                text,
+                f"{path} should enable lmms-eval JSONL cache by default",
+            )
+            self.assertIn(
+                'export LMMS_EVAL_HOME="${LMMS_EVAL_HOME:-$PROJECT_ROOT/.cache/lmms-eval}"',
+                text,
+                f"{path} should use a stable repo-local cache root by default",
+            )

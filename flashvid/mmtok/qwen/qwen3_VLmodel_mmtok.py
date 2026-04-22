@@ -228,21 +228,20 @@ class Qwen3_VL_MMTok(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, Qwen3VLModelOutputWithPast]:
-        is_visual_prefill = any(
-            value is not None
-            for value in (
-                pixel_values,
-                pixel_values_videos,
-                image_grid_thw,
-                video_grid_thw,
-            )
-        )
-        if is_visual_prefill or not hasattr(self, "_mmtok_last_sample_artifact"):
-            self._mmtok_last_sample_artifact = None
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
                 "You must specify exactly one of input_ids or inputs_embeds"
             )
+
+        is_prefill_stage = (
+            (cache_position is not None and cache_position[0] == 0)
+            or (
+                past_key_values is None
+                or past_key_values.get_seq_length() == 0
+            )
+        )
+        if is_prefill_stage or not hasattr(self, "_mmtok_last_sample_artifact"):
+            self._mmtok_last_sample_artifact = None
 
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)

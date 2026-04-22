@@ -30,10 +30,43 @@ class TestVideoBenchmarkScripts(TestCase):
         self.assertIn('"videomme"', baseline_text)
         self.assertIn('"longvideobench_val_v"', baseline_text)
 
+    def test_qwen3_original_video_entry_exists(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        script_path = (
+            repo_root
+            / "scripts"
+            / "ours_v3"
+            / "qwen3_vl_8b_video_original.sh"
+        )
+        models_init = (
+            repo_root
+            / "lmms-eval"
+            / "lmms_eval"
+            / "models"
+            / "__init__.py"
+        )
+
+        self.assertTrue(
+            script_path.exists(),
+            "Qwen3-VL original video script should exist",
+        )
+
+        script_text = script_path.read_text(encoding="utf-8")
+        self.assertIn("--model qwen3_vl_original", script_text)
+        self.assertIn('"videomme"', script_text)
+        self.assertIn('"longvideobench_val_v"', script_text)
+
+        models_text = models_init.read_text(encoding="utf-8")
+        self.assertIn(
+            '"qwen3_vl_original": "Qwen3_VL_Original"',
+            models_text,
+        )
+
     def test_ours_v3_video_scripts_support_single_process_model_parallelism(self):
         repo_root = Path(__file__).resolve().parents[4]
         paths = [
             repo_root / "scripts" / "ours_v3" / "qwen3_vl_8b_video.sh",
+            repo_root / "scripts" / "ours_v3" / "qwen3_vl_8b_video_original.sh",
             repo_root / "scripts" / "ours_v3" / "llava_onevision_7b_video.sh",
             repo_root / "scripts" / "ours_v3" / "internvl3_5_8b_video.sh",
         ]

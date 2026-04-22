@@ -47,6 +47,9 @@ def _prepare_internvl_media_inputs(
 def _resolve_internvl_video_size(model_config) -> Optional[dict]:
     image_size = getattr(model_config, "image_size", None)
     if image_size is None:
+        vision_config = getattr(model_config, "vision_config", None)
+        image_size = getattr(vision_config, "image_size", None)
+    if image_size is None:
         return None
 
     if isinstance(image_size, (list, tuple)):

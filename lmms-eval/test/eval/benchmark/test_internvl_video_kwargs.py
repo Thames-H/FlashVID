@@ -6,7 +6,9 @@ from lmms_eval.models.chat.internvl_hf import _build_internvl_processor_kwargs
 
 class InternVLVideoKwargsTest(unittest.TestCase):
     def test_build_processor_kwargs_enables_sampling_and_size_for_video(self):
-        config = SimpleNamespace(image_size=448)
+        config = SimpleNamespace(
+            vision_config=SimpleNamespace(image_size=[448, 448])
+        )
 
         images_kwargs, videos_kwargs = _build_internvl_processor_kwargs(
             model_config=config,
@@ -27,7 +29,9 @@ class InternVLVideoKwargsTest(unittest.TestCase):
         )
 
     def test_build_processor_kwargs_supports_fps_sampling(self):
-        config = SimpleNamespace(image_size=[448, 448])
+        config = SimpleNamespace(
+            vision_config=SimpleNamespace(image_size=[448, 448])
+        )
 
         _, videos_kwargs = _build_internvl_processor_kwargs(
             model_config=config,

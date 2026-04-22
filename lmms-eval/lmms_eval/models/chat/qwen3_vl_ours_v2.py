@@ -123,17 +123,17 @@ def _get_suffix_text_positions(
     return non_visual_positions[non_visual_positions > visual_positions[-1]]
 
 
-def _flatten_visual_tensor(hidden_states):
+def _concat_visual_feature_splits(hidden_states):
     if hidden_states is None:
         return None
     if isinstance(hidden_states, (list, tuple)):
-        parts = [_flatten_visual_tensor(part) for part in hidden_states]
+        parts = [_concat_visual_feature_splits(part) for part in hidden_states]
         parts = [part for part in parts if part is not None]
         if not parts:
             return None
+        if len(parts) == 1:
+            return parts[0]
         return torch.cat(parts, dim=0)
-    if hidden_states.ndim == 3:
-        return hidden_states.reshape(-1, hidden_states.shape[-1])
     return hidden_states
 
 
@@ -147,13 +147,46 @@ def _unpack_visual_outputs(outputs):
         if len(outputs) > 1:
             deepstack_features = outputs[-1]
 
-    last_hidden_state = _flatten_visual_tensor(last_hidden_state)
+    last_hidden_state = _concat_visual_feature_splits(last_hidden_state)
     if deepstack_features is not None:
+        if not isinstance(deepstack_features, (list, tuple)):
+            deepstack_features = [deepstack_features]
         deepstack_features = [
-            _flatten_visual_tensor(feature) for feature in deepstack_features
+            _concat_visual_feature_splits(feature)
+            for feature in deepstack_features
         ]
 
     return last_hidden_state, deepstack_features
+
+
+def _build_qwen_message_video_kwargs(
+    *,
+    max_pixels: int,
+    min_pixels: int,
+    max_num_frames: int,
+    fps: Optional[float],
+) -> dict:
+    video_kwargs = {
+        "max_pixels": max_pixels,
+        "min_pixels": min_pixels,
+    }
+    if fps is not None:
+        video_kwargs["fps"] = fps
+        video_kwargs["max_frames"] = max_num_frames
+    else:
+        video_kwargs["nframes"] = max_num_frames
+    return video_kwargs
+
+
+def _build_qwen_processor_video_kwargs(video_kwargs_qwen: Optional[dict]) -> dict:
+    if not video_kwargs_qwen:
+        return {}
+    processor_safe_keys = {"do_sample_frames"}
+    return {
+        key: value
+        for key, value in video_kwargs_qwen.items()
+        if key in processor_safe_keys
+    }
 
 
 def _merge_visual_inputs(
@@ -740,18 +773,15 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
             ]
             gen_kwargs = all_gen_kwargs[0]
 
-            video_kwargs = {
-                "max_pixels": self.max_pixels,
-                "min_pixels": self.min_pixels,
-            }
-            if self.fps is not None:
-                video_kwargs["fps"] = self.fps
-                video_kwargs["max_frames"] = self.max_num_frames
-            else:
-                video_kwargs["nframes"] = self.max_num_frames
+            message_video_kwargs = _build_qwen_message_video_kwargs(
+                max_pixels=self.max_pixels,
+                min_pixels=self.min_pixels,
+                max_num_frames=self.max_num_frames,
+                fps=self.fps,
+            )
 
             batched_messages = [
-                chat_message.to_hf_messages(video_kwargs=video_kwargs)
+                chat_message.to_hf_messages(video_kwargs=message_video_kwargs)
                 for chat_message in chat_messages
             ]
             texts = self.processor.apply_chat_template(
@@ -766,7 +796,9 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
                 image_patch_size=16,
                 return_video_metadata=True,
             )
-            video_kwargs = {**video_kwargs, **video_kwargs_qwen}
+            processor_video_kwargs = _build_qwen_processor_video_kwargs(
+                video_kwargs_qwen
+            )
 
             video_metadatas = None
             if video_inputs is not None:
@@ -780,7 +812,7 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
                     images=image_inputs,
                     videos=video_inputs,
                     video_metadata=video_metadatas,
-                    **video_kwargs,
+                    **processor_video_kwargs,
                     do_resize=False,
                     padding=True,
                     padding_side="left",
@@ -792,7 +824,7 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
                     images=image_inputs,
                     videos=video_inputs,
                     video_metadata=video_metadatas,
-                    **video_kwargs,
+                    **processor_video_kwargs,
                     do_resize=False,
                     return_tensors="pt",
                 )

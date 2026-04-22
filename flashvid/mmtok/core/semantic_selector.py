@@ -10,6 +10,15 @@ import torch
 import torch.nn.functional as F
 
 
+def compute_initial_marginal_gain(combined: torch.Tensor) -> torch.Tensor:
+    """Compute each token's singleton coverage gain under the merged matrix."""
+    if combined.ndim != 2:
+        raise ValueError(
+            f"combined must be 2D [rows, tokens], got shape {tuple(combined.shape)}"
+        )
+    return combined.sum(dim=0)
+
+
 @torch.jit.script
 def greedy_merged_jit_kernel(
     combined: torch.Tensor,
@@ -80,6 +89,7 @@ class SemanticTokenSelector:
             [text_to_vision, vision_to_vision * getattr(self, "alpha", 0.5)],
             dim=0,
         )
+        initial_marginal_gain = compute_initial_marginal_gain(combined)
 
         n_threshold = int(os.getenv("MMTok_JIT_N_THRESHOLD", "500"))
         k_max_threshold = int(os.getenv("MMTok_JIT_K_MAX_THRESHOLD", "20"))
@@ -116,4 +126,10 @@ class SemanticTokenSelector:
 
         selected_indices, _ = selected_indices.sort()
         selected_tokens = vision_tokens[selected_indices]
+        self.last_selection_info = {
+            "initial_marginal_gain": initial_marginal_gain.detach().cpu(),
+            "selected_indices": selected_indices.detach().cpu(),
+            "combined_rows": int(combined.shape[0]),
+            "num_tokens": int(n),
+        }
         return selected_indices.tolist(), selected_tokens

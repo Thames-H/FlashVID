@@ -306,6 +306,88 @@ def _summarize_float_values(values: List[float]) -> dict:
     }
 
 
+def _cpu_tensor(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if tensor is None:
+        return None
+    return tensor.detach().cpu()
+
+
+def _sanitize_artifact_component(value: Union[str, int]) -> str:
+    text = str(value)
+    sanitized = [
+        ch if ch.isalnum() or ch in {"-", "_", "."} else "_"
+        for ch in text
+    ]
+    return "".join(sanitized)
+
+
+def _write_sample_artifact(
+    stats_output_path: Optional[str],
+    method_name: str,
+    task_name: str,
+    doc_id: Union[str, int],
+    artifact: dict,
+) -> Optional[str]:
+    if not stats_output_path:
+        return None
+
+    artifact_dir = os.path.join(stats_output_path, "artifacts", method_name)
+    os.makedirs(artifact_dir, exist_ok=True)
+    artifact_name = (
+        f"{_sanitize_artifact_component(task_name)}"
+        f"__doc{_sanitize_artifact_component(doc_id)}.pt"
+    )
+    artifact_path = os.path.join(artifact_dir, artifact_name)
+    torch.save(artifact, artifact_path)
+    return artifact_path
+
+
+def _build_fes_sample_artifact(
+    question_text: str,
+    visual_embeddings: torch.Tensor,
+    visual_value_states: Optional[torch.Tensor],
+    fetp_scores: torch.Tensor,
+    attention_only_scores: torch.Tensor,
+    fetp_keep_local: torch.Tensor,
+    attention_only_keep_local: torch.Tensor,
+    alpha_mean: torch.Tensor,
+    deviation_mean: torch.Tensor,
+    num_keep: int,
+    target_layer: int,
+    scoring_method: str,
+    n_visual_tokens_original: int,
+    n_visual_tokens_after_stage1: int,
+) -> dict:
+    return {
+        "method": "fetp",
+        "question_text": question_text,
+        "visual_embeddings": _cpu_tensor(visual_embeddings.float()),
+        "visual_value_states": _cpu_tensor(visual_value_states.float())
+        if visual_value_states is not None
+        else None,
+        "scores": {
+            "fetp": _cpu_tensor(fetp_scores.float()),
+            "attention_only": _cpu_tensor(attention_only_scores.float()),
+            "alpha_mean": _cpu_tensor(alpha_mean.float()),
+            "deviation_mean": _cpu_tensor(deviation_mean.float()),
+        },
+        "selection": {
+            "fetp_keep_local": _cpu_tensor(fetp_keep_local.long()),
+            "attention_only_keep_local": _cpu_tensor(
+                attention_only_keep_local.long()
+            ),
+            "num_keep": int(num_keep),
+        },
+        "metadata": {
+            "target_layer": int(target_layer),
+            "scoring_method": scoring_method,
+            "n_visual_tokens_original": int(n_visual_tokens_original),
+            "n_visual_tokens_after_stage1": int(n_visual_tokens_after_stage1),
+            "n_visual_tokens_scored": int(visual_embeddings.shape[0]),
+        },
+    }
+
+
 @torch.no_grad()
 def _diversity_prune(
     features: torch.Tensor,
@@ -550,6 +632,7 @@ def _make_fetp_forward(
         mm_token_type_ids: Optional[torch.IntTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, Qwen3VLModelOutputWithPast]:
+        self._fetp_last_sample_artifact = None
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
                 "You must specify exactly one of input_ids or inputs_embeds"
@@ -826,6 +909,7 @@ def _make_fetp_forward(
                     visual_positions,
                     self.config,
                 )
+                visual_embeddings = inputs_embeds[0, visual_positions].float()
                 (
                     resolved_scoring_method,
                     num_run_layers,
@@ -863,6 +947,15 @@ def _make_fetp_forward(
                             text_chunk_size=text_chunk_size,
                         )
                     )
+                    attention_only_scores, _, _ = (
+                        _compute_fes_scores_from_compact_inputs(
+                            text_to_vis_logits=text_to_vis_logits,
+                            visual_value_states=visual_value_states,
+                            use_alpha=True,
+                            use_deviation=False,
+                            text_chunk_size=text_chunk_size,
+                        )
+                    )
                     _fes_distribution_stats.append(
                         {
                             "sample_index": len(_fes_distribution_stats),
@@ -879,7 +972,28 @@ def _make_fetp_forward(
                         }
                     )
                     keep_visual_local = scores.topk(num_keep).indices.sort().values
+                    attention_only_keep_local = (
+                        attention_only_scores.topk(num_keep).indices.sort().values
+                    )
                     score_heads = int(text_to_vis_logits.shape[1])
+                    self._fetp_last_sample_artifact = _build_fes_sample_artifact(
+                        question_text="",
+                        visual_embeddings=visual_embeddings,
+                        visual_value_states=visual_value_states[0]
+                        .permute(1, 0, 2)
+                        .reshape(visual_embeddings.shape[0], -1),
+                        fetp_scores=scores,
+                        attention_only_scores=attention_only_scores,
+                        fetp_keep_local=keep_visual_local,
+                        attention_only_keep_local=attention_only_keep_local,
+                        alpha_mean=alpha_mean,
+                        deviation_mean=deviation_mean,
+                        num_keep=num_keep,
+                        target_layer=extract_at,
+                        scoring_method=resolved_scoring_method,
+                        n_visual_tokens_original=original_n_visual_tokens,
+                        n_visual_tokens_after_stage1=n_visual_tokens_after_stage1,
+                    )
                 else:
                     eval_logger.warning(
                         "FETP(Qwen3-VL/V3): attention extraction failed, "
@@ -892,6 +1006,12 @@ def _make_fetp_forward(
                         .mul(step)
                         .long()
                     )
+                    attention_only_scores = torch.ones(
+                        int(n_visual_tokens),
+                        device=inputs_embeds.device,
+                        dtype=torch.float32,
+                    )
+                    attention_only_keep_local = keep_visual_local.clone()
                     _fes_distribution_stats.append(
                         {
                             "sample_index": len(_fes_distribution_stats),
@@ -906,6 +1026,22 @@ def _make_fetp_forward(
                         }
                     )
                     score_heads = self.language_model.config.num_attention_heads
+                    self._fetp_last_sample_artifact = _build_fes_sample_artifact(
+                        question_text="",
+                        visual_embeddings=visual_embeddings,
+                        visual_value_states=None,
+                        fetp_scores=attention_only_scores.clone(),
+                        attention_only_scores=attention_only_scores,
+                        fetp_keep_local=keep_visual_local,
+                        attention_only_keep_local=attention_only_keep_local,
+                        alpha_mean=torch.zeros_like(attention_only_scores),
+                        deviation_mean=torch.zeros_like(attention_only_scores),
+                        num_keep=num_keep,
+                        target_layer=extract_at,
+                        scoring_method=resolved_scoring_method,
+                        n_visual_tokens_original=original_n_visual_tokens,
+                        n_visual_tokens_after_stage1=n_visual_tokens_after_stage1,
+                    )
 
                 non_visual_positions = torch.where(
                     input_ids[0] != visual_token_id
@@ -1332,6 +1468,9 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             pruning_stats = getattr(
                 self.model.model, "_fetp_last_pruning_stats", {}
             )
+            sample_artifact = getattr(
+                self.model.model, "_fetp_last_sample_artifact", None
+            )
             for key, value in pruning_stats.items():
                 if isinstance(value, bool):
                     pruning_metric_last[key] = value
@@ -1371,6 +1510,31 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 eval_logger.debug(f"Question: {context}")
                 eval_logger.debug(f"Model Raw Response: {ans}")
                 eval_logger.debug(f"Model Clean Response: {clean_ans}")
+
+                if sample_artifact is not None and len(chunk_requests) == 1:
+                    artifact_to_write = dict(sample_artifact)
+                    artifact_to_write["task_name"] = req.task_name
+                    artifact_to_write["doc_id"] = req.doc_id
+                    artifact_to_write["question_text"] = context
+                    artifact_to_write["model_response"] = clean_ans
+                    artifact_path = _write_sample_artifact(
+                        stats_output_path=self.stats_output_path,
+                        method_name="fetp",
+                        task_name=req.task_name,
+                        doc_id=req.doc_id,
+                        artifact=artifact_to_write,
+                    )
+                    if artifact_path:
+                        eval_logger.info(
+                            f"[FETP-v3] wrote sample artifact to {artifact_path}"
+                        )
+
+            if sample_artifact is not None and len(chunk_requests) != 1:
+                eval_logger.warning(
+                    "[FETP-v3] skipping sample artifact export because "
+                    f"batch_size={len(chunk_requests)}; expected 1."
+                )
+            self.model.model._fetp_last_sample_artifact = None
 
             pbar.update(1)
 

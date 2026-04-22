@@ -41,6 +41,7 @@ from .qwen3_vl_ours_v2 import (
     _build_qwen_message_video_kwargs,
     _build_qwen_processor_video_kwargs,
     _get_suffix_text_positions,
+    _maybe_merge_qwen_visual_outputs,
     _merge_visual_inputs,
     _slice_attention_mask,
     _slice_position_embeddings,
@@ -593,6 +594,12 @@ def _make_fetp_forward(
             image_embeds, deepstack_image_embeds = _unpack_visual_outputs(
                 image_outputs
             )
+            image_embeds, deepstack_image_embeds = _maybe_merge_qwen_visual_outputs(
+                self,
+                image_embeds,
+                deepstack_image_embeds,
+                image_grid_thw,
+            )
             image_embeds = image_embeds.to(
                 inputs_embeds.device, inputs_embeds.dtype
             )
@@ -612,6 +619,12 @@ def _make_fetp_forward(
             )
             video_embeds, deepstack_video_embeds = _unpack_visual_outputs(
                 video_outputs
+            )
+            video_embeds, deepstack_video_embeds = _maybe_merge_qwen_visual_outputs(
+                self,
+                video_embeds,
+                deepstack_video_embeds,
+                video_grid_thw,
             )
             video_embeds = video_embeds.to(
                 inputs_embeds.device, inputs_embeds.dtype

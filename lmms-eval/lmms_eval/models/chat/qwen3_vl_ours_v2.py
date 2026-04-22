@@ -172,6 +172,68 @@ def _unpack_visual_outputs(outputs):
     return last_hidden_state, deepstack_features
 
 
+def _expected_qwen_visual_token_counts(
+    grid_thw: Optional[torch.Tensor],
+    spatial_merge_size: int,
+) -> tuple[Optional[int], Optional[int]]:
+    if grid_thw is None:
+        return None, None
+    merge_unit = max(1, int(spatial_merge_size) ** 2)
+    raw_tokens = int(grid_thw.prod(-1).sum().item())
+    merged_tokens = int((grid_thw.prod(-1) // merge_unit).sum().item())
+    return merged_tokens, raw_tokens
+
+
+def _maybe_merge_qwen_visual_outputs(
+    model,
+    visual_embeds: Optional[torch.Tensor],
+    deepstack_features,
+    grid_thw: Optional[torch.Tensor],
+):
+    if visual_embeds is None or grid_thw is None:
+        return visual_embeds, deepstack_features
+
+    visual_model = getattr(model, "visual", None)
+    if visual_model is None or not hasattr(visual_model, "merger"):
+        return visual_embeds, deepstack_features
+
+    spatial_merge_size = getattr(
+        visual_model,
+        "spatial_merge_size",
+        getattr(model.config.vision_config, "spatial_merge_size", 1),
+    )
+    expected_tokens, raw_tokens = _expected_qwen_visual_token_counts(
+        grid_thw,
+        spatial_merge_size,
+    )
+    if expected_tokens is None or raw_tokens is None:
+        return visual_embeds, deepstack_features
+    if visual_embeds.shape[0] == expected_tokens:
+        return visual_embeds, deepstack_features
+    if visual_embeds.shape[0] != raw_tokens or expected_tokens == raw_tokens:
+        return visual_embeds, deepstack_features
+
+    visual_embeds = visual_model.merger(visual_embeds)
+
+    if deepstack_features is not None:
+        merger_list = list(getattr(visual_model, "deepstack_merger_list", []))
+        normalized_features = []
+        for idx, feature in enumerate(deepstack_features):
+            if feature is None:
+                normalized_features.append(feature)
+                continue
+            if feature.shape[0] == expected_tokens:
+                normalized_features.append(feature)
+                continue
+            if feature.shape[0] == raw_tokens and idx < len(merger_list):
+                normalized_features.append(merger_list[idx](feature))
+                continue
+            normalized_features.append(feature)
+        deepstack_features = normalized_features
+
+    return visual_embeds, deepstack_features
+
+
 def _build_qwen_message_video_kwargs(
     *,
     max_pixels: int,
@@ -465,6 +527,12 @@ def _make_fetp_forward(
             image_embeds, deepstack_image_embeds = _unpack_visual_outputs(
                 image_outputs
             )
+            image_embeds, deepstack_image_embeds = _maybe_merge_qwen_visual_outputs(
+                self,
+                image_embeds,
+                deepstack_image_embeds,
+                image_grid_thw,
+            )
             image_embeds = image_embeds.to(
                 inputs_embeds.device, inputs_embeds.dtype
             )
@@ -484,6 +552,12 @@ def _make_fetp_forward(
             )
             video_embeds, deepstack_video_embeds = _unpack_visual_outputs(
                 video_outputs
+            )
+            video_embeds, deepstack_video_embeds = _maybe_merge_qwen_visual_outputs(
+                self,
+                video_embeds,
+                deepstack_video_embeds,
+                video_grid_thw,
             )
             video_embeds = video_embeds.to(
                 inputs_embeds.device, inputs_embeds.dtype

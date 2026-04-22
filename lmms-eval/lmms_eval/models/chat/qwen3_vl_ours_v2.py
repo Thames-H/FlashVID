@@ -82,10 +82,23 @@ def _compute_fes_scores(
     use_alpha: bool = True,
     use_deviation: bool = True,
 ) -> torch.Tensor:
-    compact_logits = attn_logits.index_select(2, text_positions).index_select(
-        3, visual_positions
+    text_positions = _align_index_device(text_positions, attn_logits)
+    visual_positions_for_logits = _align_index_device(
+        visual_positions,
+        attn_logits,
     )
-    compact_values = value_states.index_select(2, visual_positions)
+    visual_positions_for_values = _align_index_device(
+        visual_positions,
+        value_states,
+    )
+    compact_logits = attn_logits.index_select(2, text_positions).index_select(
+        3,
+        visual_positions_for_logits,
+    )
+    compact_values = value_states.index_select(
+        2,
+        visual_positions_for_values,
+    )
     return _compute_fes_scores_from_compact_inputs(
         text_to_vis_logits=compact_logits,
         visual_value_states=compact_values,
@@ -228,6 +241,19 @@ def _merge_visual_inputs(
     return visual_pos_masks, deepstack_visual_embeds
 
 
+def _align_index_device(
+    index: torch.Tensor,
+    reference: Union[torch.Tensor, torch.device],
+) -> torch.Tensor:
+    if isinstance(reference, torch.Tensor):
+        target_device = reference.device
+    else:
+        target_device = reference
+    if index.device == target_device:
+        return index
+    return index.to(target_device)
+
+
 def _slice_attention_mask(attention_mask, keep_indices):
     if attention_mask is None:
         return None
@@ -237,6 +263,8 @@ def _slice_attention_mask(attention_mask, keep_indices):
         for key, value in attention_mask.items():
             pruned[key] = _slice_attention_mask(value, keep_indices)
         return pruned
+
+    keep_indices = _align_index_device(keep_indices, attention_mask)
 
     if attention_mask.ndim == 2:
         return attention_mask[:, keep_indices]
@@ -251,6 +279,7 @@ def _slice_position_embeddings(position_embeddings, positions: torch.Tensor):
     cos, sin = position_embeddings
     if positions.numel() == 0:
         return cos[:, :0, :], sin[:, :0, :]
+    positions = _align_index_device(positions, cos)
     return cos.index_select(1, positions), sin.index_select(1, positions)
 
 
@@ -294,8 +323,15 @@ def _forward_extract(
             attn_module = layer.self_attn
             bsz = hidden_normed.size(0)
             n_vis = visual_positions.numel()
+            layer_visual_positions = _align_index_device(
+                visual_positions,
+                hidden_normed,
+            )
 
-            visual_hidden = hidden_normed.index_select(1, visual_positions)
+            visual_hidden = hidden_normed.index_select(
+                1,
+                layer_visual_positions,
+            )
             visual_shape = (bsz, n_vis, -1, attn_module.head_dim)
             key_states = attn_module.k_proj(visual_hidden).view(visual_shape)
             value_states = attn_module.v_proj(visual_hidden).view(visual_shape)
@@ -305,7 +341,7 @@ def _forward_extract(
 
             visual_cos, visual_sin = _slice_position_embeddings(
                 position_embeddings,
-                visual_positions,
+                layer_visual_positions,
             )
             key_states, _ = apply_rotary_pos_emb(
                 key_states,
@@ -325,7 +361,14 @@ def _forward_extract(
                     n_vis,
                 )
             else:
-                text_hidden = hidden_normed.index_select(1, text_positions)
+                layer_text_positions = _align_index_device(
+                    text_positions,
+                    hidden_normed,
+                )
+                text_hidden = hidden_normed.index_select(
+                    1,
+                    layer_text_positions,
+                )
                 text_shape = (
                     bsz,
                     text_positions.numel(),
@@ -337,7 +380,7 @@ def _forward_extract(
 
                 text_cos, text_sin = _slice_position_embeddings(
                     position_embeddings,
-                    text_positions,
+                    layer_text_positions,
                 )
                 query_states, _ = apply_rotary_pos_emb(
                     query_states,
@@ -596,7 +639,12 @@ def _make_fetp_forward(
                 keep_global_indices = torch.cat(
                     [
                         non_visual_positions,
-                        visual_positions[keep_visual_local],
+                        visual_positions[
+                            _align_index_device(
+                                keep_visual_local,
+                                visual_positions,
+                            )
+                        ],
                     ],
                     dim=0,
                 ).sort().values
@@ -608,25 +656,47 @@ def _make_fetp_forward(
                 inputs_embeds = torch.gather(
                     inputs_embeds, dim=1, index=gather_index
                 )
-                position_ids = position_ids[:, :, keep_global_indices]
+                keep_indices_for_position_ids = _align_index_device(
+                    keep_global_indices,
+                    position_ids,
+                )
+                position_ids = position_ids[:, :, keep_indices_for_position_ids]
                 attention_mask = _slice_attention_mask(
                     attention_mask, keep_global_indices
                 )
-                cache_position = cache_position[keep_global_indices]
+                cache_position = cache_position[
+                    _align_index_device(keep_global_indices, cache_position)
+                ]
 
                 if visual_pos_masks is not None:
                     original_visual_positions = torch.where(
                         visual_pos_masks[0]
                     )[0]
+                    keep_indices_for_visual_mask = _align_index_device(
+                        keep_global_indices,
+                        original_visual_positions,
+                    )
                     joint_visual_keep_indices = torch.where(
                         torch.isin(
-                            original_visual_positions, keep_global_indices
+                            original_visual_positions,
+                            keep_indices_for_visual_mask,
                         )
                     )[0]
-                    visual_pos_masks = visual_pos_masks[:, keep_global_indices]
+                    visual_pos_masks = visual_pos_masks[
+                        :,
+                        _align_index_device(
+                            keep_global_indices,
+                            visual_pos_masks,
+                        ),
+                    ]
                     if deepstack_visual_embeds is not None:
                         deepstack_visual_embeds = [
-                            embed[joint_visual_keep_indices]
+                            embed[
+                                _align_index_device(
+                                    joint_visual_keep_indices,
+                                    embed,
+                                )
+                            ]
                             for embed in deepstack_visual_embeds
                         ]
             else:

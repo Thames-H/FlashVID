@@ -37,6 +37,7 @@ from lmms_eval.models.simple.qwen3_vl import Qwen3_VL as Qwen3_VLSimple
 from lmms_eval.protocol import ChatMessages
 
 from .qwen3_vl_ours_v2 import (
+    _align_index_device,
     _build_qwen_message_video_kwargs,
     _build_qwen_processor_video_kwargs,
     _get_suffix_text_positions,
@@ -255,8 +256,14 @@ def _compute_fes_scores_from_visual_logits(
     if visual_positions.numel() == 0:
         return torch.empty(0, device=value_states.device)
 
-    compact_logits = attn_logits.index_select(3, visual_positions)
-    compact_values = value_states.index_select(2, visual_positions)
+    compact_logits = attn_logits.index_select(
+        3,
+        _align_index_device(visual_positions, attn_logits),
+    )
+    compact_values = value_states.index_select(
+        2,
+        _align_index_device(visual_positions, value_states),
+    )
     scores, _, _ = _compute_fes_scores_from_compact_inputs(
         text_to_vis_logits=compact_logits,
         visual_value_states=compact_values,
@@ -326,13 +333,23 @@ def _slice_visual_inputs(
         return visual_pos_masks, deepstack_visual_embeds
 
     original_visual_positions = torch.where(visual_pos_masks[0])[0]
+    keep_indices_for_visual_positions = _align_index_device(
+        keep_global_indices,
+        original_visual_positions,
+    )
     joint_visual_keep_indices = torch.where(
-        torch.isin(original_visual_positions, keep_global_indices)
+        torch.isin(
+            original_visual_positions,
+            keep_indices_for_visual_positions,
+        )
     )[0]
-    visual_pos_masks = visual_pos_masks[:, keep_global_indices]
+    visual_pos_masks = visual_pos_masks[
+        :,
+        _align_index_device(keep_global_indices, visual_pos_masks),
+    ]
     if deepstack_visual_embeds is not None:
         deepstack_visual_embeds = [
-            embed[joint_visual_keep_indices]
+            embed[_align_index_device(joint_visual_keep_indices, embed)]
             for embed in deepstack_visual_embeds
         ]
     return visual_pos_masks, deepstack_visual_embeds
@@ -385,8 +402,15 @@ def _forward_extract(
 
             attn_module = layer.self_attn
             bsz, _, _ = hidden_normed.size()
+            layer_visual_positions = _align_index_device(
+                visual_positions,
+                hidden_normed,
+            )
 
-            visual_hidden = hidden_normed.index_select(1, visual_positions)
+            visual_hidden = hidden_normed.index_select(
+                1,
+                layer_visual_positions,
+            )
             visual_shape = (
                 bsz,
                 visual_positions.numel(),
@@ -401,7 +425,7 @@ def _forward_extract(
 
             visual_cos, visual_sin = _slice_position_embeddings(
                 position_embeddings,
-                visual_positions,
+                layer_visual_positions,
             )
             key_states, _ = apply_rotary_pos_emb(
                 key_states,
@@ -421,7 +445,14 @@ def _forward_extract(
                     visual_positions.numel(),
                 ).float()
             else:
-                text_hidden = hidden_normed.index_select(1, text_positions)
+                layer_text_positions = _align_index_device(
+                    text_positions,
+                    hidden_normed,
+                )
+                text_hidden = hidden_normed.index_select(
+                    1,
+                    layer_text_positions,
+                )
                 text_shape = (
                     bsz,
                     text_positions.numel(),
@@ -433,7 +464,7 @@ def _forward_extract(
 
                 text_cos, text_sin = _slice_position_embeddings(
                     position_embeddings,
-                    text_positions,
+                    layer_text_positions,
                 )
                 query_states, _ = apply_rotary_pos_emb(
                     query_states,
@@ -688,7 +719,14 @@ def _make_fetp_forward(
                 if two_stage and n_visual_tokens > 1:
                     layer0 = self.language_model.layers[0]
                     hidden_normed = layer0.input_layernorm(inputs_embeds)
-                    visual_hidden = hidden_normed.index_select(1, visual_positions)
+                    stage1_visual_positions = _align_index_device(
+                        visual_positions,
+                        hidden_normed,
+                    )
+                    visual_hidden = hidden_normed.index_select(
+                        1,
+                        stage1_visual_positions,
+                    )
                     stage1_values = layer0.self_attn.v_proj(visual_hidden)[0]
                     stage1_keep = _diversity_prune(
                         stage1_values,
@@ -701,7 +739,12 @@ def _make_fetp_forward(
                     keep_global_indices = torch.cat(
                         [
                             non_visual_positions,
-                            visual_positions[stage1_keep],
+                            visual_positions[
+                                _align_index_device(
+                                    stage1_keep,
+                                    visual_positions,
+                                )
+                            ],
                         ],
                         dim=0,
                     ).sort().values
@@ -717,13 +760,23 @@ def _make_fetp_forward(
                         dim=1,
                         index=gather_index,
                     )
-                    input_ids = input_ids[:, keep_global_indices]
-                    position_ids = position_ids[:, :, keep_global_indices]
+                    keep_indices_for_input_ids = _align_index_device(
+                        keep_global_indices,
+                        input_ids,
+                    )
+                    input_ids = input_ids[:, keep_indices_for_input_ids]
+                    keep_indices_for_position_ids = _align_index_device(
+                        keep_global_indices,
+                        position_ids,
+                    )
+                    position_ids = position_ids[:, :, keep_indices_for_position_ids]
                     attention_mask = _slice_attention_mask(
                         attention_mask,
                         keep_global_indices,
                     )
-                    cache_position = cache_position[keep_global_indices]
+                    cache_position = cache_position[
+                        _align_index_device(keep_global_indices, cache_position)
+                    ]
                     (
                         visual_pos_masks,
                         deepstack_visual_embeds,
@@ -847,7 +900,12 @@ def _make_fetp_forward(
                 keep_global_indices = torch.cat(
                     [
                         non_visual_positions,
-                        visual_positions[keep_visual_local],
+                        visual_positions[
+                            _align_index_device(
+                                keep_visual_local,
+                                visual_positions,
+                            )
+                        ],
                     ],
                     dim=0,
                 ).sort().values
@@ -863,13 +921,23 @@ def _make_fetp_forward(
                     dim=1,
                     index=gather_index,
                 )
-                input_ids = input_ids[:, keep_global_indices]
-                position_ids = position_ids[:, :, keep_global_indices]
+                keep_indices_for_input_ids = _align_index_device(
+                    keep_global_indices,
+                    input_ids,
+                )
+                input_ids = input_ids[:, keep_indices_for_input_ids]
+                keep_indices_for_position_ids = _align_index_device(
+                    keep_global_indices,
+                    position_ids,
+                )
+                position_ids = position_ids[:, :, keep_indices_for_position_ids]
                 attention_mask = _slice_attention_mask(
                     attention_mask,
                     keep_global_indices,
                 )
-                cache_position = cache_position[keep_global_indices]
+                cache_position = cache_position[
+                    _align_index_device(keep_global_indices, cache_position)
+                ]
                 (
                     visual_pos_masks,
                     deepstack_visual_embeds,

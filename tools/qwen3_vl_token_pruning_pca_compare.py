@@ -241,6 +241,11 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--report-samples", type=int, default=3)
     parser.add_argument("--target-layer", type=int, default=None)
+    parser.add_argument(
+        "--report-title",
+        type=str,
+        default="Qwen3-VL Token Pruning PCA Compare",
+    )
     args = parser.parse_args()
 
     artifact_root = _resolve_layer_root(args.artifact_root, args.target_layer)
@@ -316,7 +321,7 @@ def main() -> None:
     )
 
     report_lines = [
-        "# Qwen3-VL Token Pruning PCA Compare",
+        f"# {args.report_title}",
         "",
         f"- Artifact root: `{artifact_root}`",
         f"- Matched samples: `{len(matched_rows)}`",

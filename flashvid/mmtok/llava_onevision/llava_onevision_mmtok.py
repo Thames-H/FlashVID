@@ -271,6 +271,35 @@ def _build_keep_indices(
     return torch.cat(keep_parts, dim=0).sort().values
 
 
+def _cpu_tensor(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if tensor is None:
+        return None
+    return tensor.detach().cpu()
+
+
+def _build_mmtok_sample_artifact(
+    visual_embeddings: torch.Tensor,
+    initial_marginal_gain: torch.Tensor,
+    mmtok_keep_local: torch.Tensor,
+) -> dict:
+    return {
+        "method": "mmtok",
+        "visual_embeddings": _cpu_tensor(visual_embeddings.float()),
+        "scores": {
+            "initial_marginal_gain": _cpu_tensor(
+                initial_marginal_gain.float()
+            ),
+        },
+        "selection": {
+            "mmtok_keep_local": _cpu_tensor(mmtok_keep_local.long()),
+            "num_keep": int(mmtok_keep_local.numel()),
+        },
+        "metadata": {
+            "n_visual_tokens_scored": int(visual_embeddings.shape[0]),
+        },
+    }
+
+
 class LlavaOnevision_MMTok(nn.Module):
     def forward(
         self: LlavaOnevisionModel,
@@ -290,6 +319,16 @@ class LlavaOnevision_MMTok(nn.Module):
         use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, LlavaOnevisionModelOutputWithPast]:
+        is_prefill_stage = (
+            past_key_values is None
+            or (
+                hasattr(past_key_values, "get_seq_length")
+                and past_key_values.get_seq_length() == 0
+            )
+        )
+        if is_prefill_stage or not hasattr(self, "_mmtok_last_sample_artifact"):
+            self._mmtok_last_sample_artifact = None
+
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -298,6 +337,8 @@ class LlavaOnevision_MMTok(nn.Module):
 
         image_hidden_states = None
         video_hidden_states = None
+        original_image_features = None
+        image_selection_info = None
 
         if not _should_apply_mmtok(self, input_ids, inputs_embeds):
             return _forward_without_mmtok(
@@ -336,6 +377,7 @@ class LlavaOnevision_MMTok(nn.Module):
                     **kwargs,
                 ).to(inputs_embeds.device, inputs_embeds.dtype)
                 original_image_feature_count = image_features.shape[0]
+                original_image_features = image_features
                 image_hidden_states = image_features
                 question = self.get_question() if hasattr(self, "get_question") else ""
                 target_tokens = compute_target_vision_tokens(
@@ -354,6 +396,11 @@ class LlavaOnevision_MMTok(nn.Module):
                         image_keep_local,
                         device=inputs_embeds.device,
                         dtype=torch.long,
+                    )
+                    image_selection_info = getattr(
+                        self._mmtok_core.token_selector,
+                        "last_selection_info",
+                        None,
                     )
                     image_hidden_states = selected_image_features.to(
                         inputs_embeds.device,
@@ -465,6 +512,37 @@ class LlavaOnevision_MMTok(nn.Module):
             inputs_embeds = gather_sequence_hidden_states(inputs_embeds, keep_indices)
             attention_mask = slice_attention_mask(attention_mask, keep_indices)
             position_ids = slice_position_ids(position_ids, keep_indices)
+
+            if (
+                original_image_features is not None
+                and pixel_values is not None
+                and pixel_values_videos is None
+            ):
+                final_keep = image_keep_local
+                if final_keep is None:
+                    final_keep = torch.arange(
+                        original_image_features.shape[0],
+                        device=original_image_features.device,
+                        dtype=torch.long,
+                    )
+                if (
+                    image_selection_info is not None
+                    and "initial_marginal_gain" in image_selection_info
+                ):
+                    initial_marginal_gain = image_selection_info[
+                        "initial_marginal_gain"
+                    ].to(original_image_features.device)
+                else:
+                    initial_marginal_gain = torch.ones(
+                        original_image_features.shape[0],
+                        device=original_image_features.device,
+                        dtype=torch.float32,
+                    )
+                self._mmtok_last_sample_artifact = _build_mmtok_sample_artifact(
+                    visual_embeddings=original_image_features,
+                    initial_marginal_gain=initial_marginal_gain,
+                    mmtok_keep_local=final_keep,
+                )
         except Exception as error:
             eval_logger.warning(
                 f"[MMTok-LLaVA-OneVision] Falling back to full visual tokens due to selection failure: {error}"

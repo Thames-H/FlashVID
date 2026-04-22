@@ -1,11 +1,14 @@
 """FETP-v3 for LLaVA-OneVision (HF format)."""
 
 import inspect
-from typing import Optional, Union
+import os
+import time
+from typing import Dict, List, Optional, Union
 
 import torch
 import torch.nn.functional as F
 from loguru import logger as eval_logger
+from tqdm import tqdm
 from transformers.masking_utils import (
     create_causal_mask,
     create_sliding_window_causal_mask,
@@ -20,9 +23,21 @@ from transformers.models.qwen2.modeling_qwen2 import (
     repeat_kv,
 )
 
+from lmms_eval import utils
+from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
+from lmms_eval.models.model_utils.gen_metrics import log_metrics
+from lmms_eval.protocol import ChatMessages
 
-from .llava_hf import LlavaHf as LlavaHfChat
+from .llava_hf import (
+    LlavaHf as LlavaHfChat,
+    _build_llava_processor_kwargs,
+    _prepare_llava_media_inputs,
+)
+from .llava_onevision_visual_compare_utils import (
+    attach_visual_compare_metadata,
+    build_visual_compare_metadata,
+)
 
 
 def _call_mask_fn(
@@ -291,6 +306,92 @@ def _slice_attention_mask(attention_mask, keep_indices: torch.Tensor):
     if attention_mask.ndim == 4:
         return attention_mask[:, :, keep_indices][:, :, :, keep_indices]
     return attention_mask
+
+
+def _cpu_tensor(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if tensor is None:
+        return None
+    return tensor.detach().cpu()
+
+
+def _sanitize_artifact_component(value: Union[str, int]) -> str:
+    text = str(value)
+    sanitized = [
+        ch if ch.isalnum() or ch in {"-", "_", "."} else "_"
+        for ch in text
+    ]
+    return "".join(sanitized)
+
+
+def _write_sample_artifact(
+    stats_output_path: Optional[str],
+    method_name: str,
+    task_name: str,
+    doc_id: Union[str, int],
+    artifact: dict,
+) -> Optional[str]:
+    if not stats_output_path:
+        return None
+
+    artifact_dir = os.path.join(stats_output_path, "artifacts", method_name)
+    os.makedirs(artifact_dir, exist_ok=True)
+    artifact_name = (
+        f"{_sanitize_artifact_component(task_name)}"
+        f"__doc{_sanitize_artifact_component(doc_id)}.pt"
+    )
+    artifact_path = os.path.join(artifact_dir, artifact_name)
+    torch.save(artifact, artifact_path)
+    return artifact_path
+
+
+def _build_fes_sample_artifact(
+    question_text: str,
+    visual_embeddings: torch.Tensor,
+    visual_value_states: Optional[torch.Tensor],
+    fetp_scores: torch.Tensor,
+    attention_only_scores: torch.Tensor,
+    fetp_keep_local: torch.Tensor,
+    attention_only_keep_local: torch.Tensor,
+    stage1_keep_local: Optional[torch.Tensor],
+    num_keep: int,
+    target_layer: int,
+    scoring_method: str,
+    n_visual_tokens_original: int,
+    n_visual_tokens_after_stage1: Optional[int],
+) -> dict:
+    return {
+        "method": "fetp",
+        "question_text": question_text,
+        "visual_embeddings": _cpu_tensor(visual_embeddings.float()),
+        "visual_value_states": _cpu_tensor(visual_value_states.float())
+        if visual_value_states is not None
+        else None,
+        "scores": {
+            "fetp": _cpu_tensor(fetp_scores.float()),
+            "attention_only": _cpu_tensor(attention_only_scores.float()),
+        },
+        "selection": {
+            "fetp_keep_local": _cpu_tensor(fetp_keep_local.long()),
+            "attention_only_keep_local": _cpu_tensor(
+                attention_only_keep_local.long()
+            ),
+            "stage1_keep_local": _cpu_tensor(stage1_keep_local.long())
+            if stage1_keep_local is not None
+            else None,
+            "num_keep": int(num_keep),
+        },
+        "metadata": {
+            "target_layer": int(target_layer),
+            "scoring_method": scoring_method,
+            "n_visual_tokens_original": int(n_visual_tokens_original),
+            "n_visual_tokens_after_stage1": (
+                int(n_visual_tokens_after_stage1)
+                if n_visual_tokens_after_stage1 is not None
+                else None
+            ),
+            "n_visual_tokens_scored": int(visual_embeddings.shape[0]),
+        },
+    }
 
 
 def _get_suffix_text_positions(
@@ -676,6 +777,9 @@ def _make_fetp_forward(
                 device=inputs_embeds.device,
             ).unsqueeze(0)
 
+        if is_prefill or not hasattr(self, "_fetp_last_sample_artifact"):
+            self._fetp_last_sample_artifact = None
+
         if (
             input_ids is not None
             and inputs_embeds.shape[0] == 1
@@ -714,6 +818,8 @@ def _make_fetp_forward(
 
                     try:
                         original_n_visual_tokens = n_visual_tokens
+                        artifact_stage1_keep_local = None
+                        scored_visual_embeddings = image_features
                         if two_stage and n_visual_tokens > 1:
                             layer0 = self.language_model.layers[0]
                             stage1_hidden = _cast_tensor_for_module(
@@ -733,6 +839,11 @@ def _make_fetp_forward(
                             stage1_keep = _diversity_prune(
                                 stage1_values,
                                 keep_ratio=0.5,
+                            )
+                            artifact_stage1_keep_local = stage1_keep
+                            scored_visual_embeddings = image_features.index_select(
+                                0,
+                                stage1_keep,
                             )
 
                             non_visual_positions = torch.where(
@@ -827,8 +938,38 @@ def _make_fetp_forward(
                                 use_deviation=use_deviation,
                                 text_chunk_size=text_chunk_size,
                             )
+                            attention_only_scores = _compute_fes_scores_from_compact_inputs(
+                                text_to_vis_logits=text_to_vis_logits,
+                                visual_value_states=visual_value_states,
+                                use_alpha=True,
+                                use_deviation=False,
+                                text_chunk_size=text_chunk_size,
+                            )
                             _, top_indices = scores.topk(num_keep)
                             keep_visual_local = top_indices.sort().values
+                            _, attention_only_top = attention_only_scores.topk(num_keep)
+                            attention_only_keep_local = (
+                                attention_only_top.sort().values
+                            )
+                            self._fetp_last_sample_artifact = _build_fes_sample_artifact(
+                                question_text="",
+                                visual_embeddings=scored_visual_embeddings,
+                                visual_value_states=visual_value_states,
+                                fetp_scores=scores,
+                                attention_only_scores=attention_only_scores,
+                                fetp_keep_local=keep_visual_local,
+                                attention_only_keep_local=attention_only_keep_local,
+                                stage1_keep_local=artifact_stage1_keep_local,
+                                num_keep=num_keep,
+                                target_layer=extract_at,
+                                scoring_method=scoring_method,
+                                n_visual_tokens_original=original_n_visual_tokens,
+                                n_visual_tokens_after_stage1=(
+                                    n_visual_tokens
+                                    if artifact_stage1_keep_local is not None
+                                    else None
+                                ),
+                            )
                         else:
                             eval_logger.warning(
                                 "FETP(LLaVA-OneVision): attention extraction "
@@ -844,6 +985,8 @@ def _make_fetp_forward(
                                 .mul(step)
                                 .long()
                             )
+                            attention_only_keep_local = keep_visual_local
+                            self._fetp_last_sample_artifact = None
 
                         non_visual_positions = torch.where(
                             input_ids[0] != visual_token_id
@@ -934,6 +1077,7 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         use_deviation: bool = True,
         two_stage: bool = True,
         text_chunk_size: Optional[int] = 32,
+        stats_output_path: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -952,6 +1096,7 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         )
 
         self.retention_ratio = retention_ratio
+        self.stats_output_path = stats_output_path
         eval_logger.info(
             "[LlavaOnevisionOursV3 / FETP-v3] "
             f"retention_ratio={retention_ratio}, "
@@ -961,7 +1106,8 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             f"use_alpha={use_alpha}, "
             f"use_deviation={use_deviation}, "
             f"two_stage={two_stage}, "
-            f"text_chunk_size={text_chunk_size}"
+            f"text_chunk_size={text_chunk_size}, "
+            f"stats_output_path={stats_output_path}"
         )
 
         LlavaOnevisionModel.forward = _make_fetp_forward(
@@ -974,3 +1120,181 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             two_stage=two_stage,
             text_chunk_size=text_chunk_size,
         )
+
+    def generate_until(self, requests: List[Instance]) -> List[str]:
+        res = []
+
+        def _collate(x):
+            return x[2], x[2]
+
+        re_ords = utils.Collator(
+            [reg.args for reg in requests],
+            _collate,
+            group_fn=lambda x: x[2],
+            grouping=True,
+        )
+        chunks = re_ords.get_batched(n=self.batch_size, batch_fn=None)
+        num_iters = (
+            len(requests) // self.batch_size
+            if len(requests) % self.batch_size == 0
+            else len(requests) // self.batch_size + 1
+        )
+        pbar = tqdm(
+            total=num_iters,
+            disable=(self.rank != 0),
+            desc="Model Responding",
+        )
+        e2e_latency = 0
+        total_tokens = 0
+
+        for chunk in chunks:
+            ctx, doc_to_messages, all_gen_kwargs, doc_id, task, split = zip(*chunk)
+            task_name = task[0]
+            split_name = split[0]
+            chat_messages = [
+                doc_to_messages[0](self.task_dict[task_name][split_name][ids])
+                for ids in doc_id
+            ]
+            chat_messages = [
+                ChatMessages(**{"messages": message})
+                for message in chat_messages
+            ]
+            visuals = []
+            videos = []
+            for messages in chat_messages:
+                visual, video, _ = messages.extract_media()
+                visuals.append(visual)
+                videos.append(video)
+            visuals = self.flatten(visuals)
+            videos = self.flatten(videos)
+            assert self.batch_size_per_gpu == 1, (
+                "Do not support batch_size_per_gpu > 1 for now"
+            )
+
+            messages = chat_messages[0].model_dump()["messages"]
+            text = self._image_processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+            visuals, videos, image_sizes = _prepare_llava_media_inputs(
+                visuals,
+                videos,
+            )
+            images_kwargs, videos_kwargs = _build_llava_processor_kwargs(
+                self.model.config,
+                self.max_frames_num,
+            )
+            inputs = self._prepare_processor_inputs(
+                self._image_processor(
+                    images=visuals,
+                    videos=videos,
+                    text=text,
+                    return_tensors="pt",
+                    **images_kwargs,
+                    **videos_kwargs,
+                )
+            )
+
+            gen_kwargs = dict(all_gen_kwargs[0])
+            gen_kwargs["image_sizes"] = image_sizes
+            if "max_new_tokens" not in gen_kwargs:
+                gen_kwargs["max_new_tokens"] = 1024
+            if "temperature" not in gen_kwargs:
+                gen_kwargs["temperature"] = 0
+            if "top_p" not in gen_kwargs:
+                gen_kwargs["top_p"] = None
+            if "num_beams" not in gen_kwargs:
+                gen_kwargs["num_beams"] = 1
+            do_sample = gen_kwargs["temperature"] > 0
+
+            try:
+                start_time = time.time()
+                cont = self.model.generate(
+                    **inputs,
+                    do_sample=do_sample,
+                    temperature=gen_kwargs["temperature"] if do_sample else None,
+                    top_p=gen_kwargs["top_p"],
+                    num_beams=gen_kwargs["num_beams"],
+                    max_new_tokens=gen_kwargs["max_new_tokens"],
+                    use_cache=self.use_cache,
+                    pad_token_id=self.eot_token_id,
+                    eos_token_id=self.eot_token_id,
+                )
+                end_time = time.time()
+                cont = cont[:, inputs["input_ids"].shape[-1] :]
+                e2e_latency += end_time - start_time
+                total_tokens += cont.shape[-1] if len(cont.shape) > 1 else len(cont)
+            except Exception as error:
+                eval_logger.error(f"Error {error} in generating")
+                cont = ""
+
+            sample_artifact = getattr(
+                self.model.model,
+                "_fetp_last_sample_artifact",
+                None,
+            )
+            text_outputs = (
+                self.tokenizer.batch_decode(cont, skip_special_tokens=True)[0]
+                if cont != ""
+                else ""
+            )
+
+            res.append(text_outputs)
+            self.cache_hook.add_partial("generate_until", (text, gen_kwargs), text_outputs)
+
+            if sample_artifact is not None and len(chunk) == 1:
+                artifact_to_write = dict(sample_artifact)
+                artifact_to_write["task_name"] = task_name
+                artifact_to_write["doc_id"] = doc_id[0]
+                artifact_to_write["question_text"] = text
+                artifact_to_write["model_response"] = text_outputs
+                artifact_to_write = attach_visual_compare_metadata(
+                    artifact_to_write,
+                    build_visual_compare_metadata(
+                        image_inputs=visuals,
+                        video_inputs=videos,
+                        model_config=self.model.config,
+                        n_visual_tokens_scored=artifact_to_write["metadata"][
+                            "n_visual_tokens_scored"
+                        ],
+                        vision_aspect_ratio=getattr(
+                            self.model.config,
+                            "vision_aspect_ratio",
+                            "anyres_max_9",
+                        ),
+                        stage1_keep_local=artifact_to_write["selection"].get(
+                            "stage1_keep_local"
+                        ),
+                    ),
+                    target_layer=artifact_to_write["metadata"].get("target_layer"),
+                )
+                artifact_path = _write_sample_artifact(
+                    stats_output_path=self.stats_output_path,
+                    method_name="fetp",
+                    task_name=task_name,
+                    doc_id=doc_id[0],
+                    artifact=artifact_to_write,
+                )
+                if artifact_path:
+                    eval_logger.info(
+                        f"[LLaVA-OneVision / FETP-v3] wrote sample artifact to {artifact_path}"
+                    )
+
+            self.model.model._fetp_last_sample_artifact = None
+            pbar.update(1)
+
+        res = re_ords.get_original(res)
+        metric_dict = {
+            "total_tokens": total_tokens,
+            "e2e_latency": e2e_latency,
+            "avg_speed": total_tokens / e2e_latency if e2e_latency > 0 else 0,
+            "additional_metrics": {
+                "rank": self.rank,
+            },
+        }
+        log_metrics(**metric_dict)
+
+        pbar.close()
+        return res

@@ -21,7 +21,7 @@ _FLASHVID_ONLY_ARGS = {
 
 @register_model("qwen3_vl_original")
 class Qwen3_VL_Original(Qwen3VLSimple):
-    is_simple = False
+    is_simple = True
 
     def __init__(
         self,

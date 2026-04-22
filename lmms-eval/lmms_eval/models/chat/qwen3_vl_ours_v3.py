@@ -356,7 +356,7 @@ def _build_fes_sample_artifact(
     target_layer: int,
     scoring_method: str,
     n_visual_tokens_original: int,
-    n_visual_tokens_after_stage1: int,
+    n_visual_tokens_after_stage1: Optional[int],
 ) -> dict:
     return {
         "method": "fetp",
@@ -382,7 +382,11 @@ def _build_fes_sample_artifact(
             "target_layer": int(target_layer),
             "scoring_method": scoring_method,
             "n_visual_tokens_original": int(n_visual_tokens_original),
-            "n_visual_tokens_after_stage1": int(n_visual_tokens_after_stage1),
+            "n_visual_tokens_after_stage1": (
+                int(n_visual_tokens_after_stage1)
+                if n_visual_tokens_after_stage1 is not None
+                else None
+            ),
             "n_visual_tokens_scored": int(visual_embeddings.shape[0]),
         },
     }

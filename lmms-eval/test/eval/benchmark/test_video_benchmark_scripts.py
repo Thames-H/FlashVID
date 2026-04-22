@@ -58,7 +58,7 @@ class TestVideoBenchmarkScripts(TestCase):
 
         models_text = models_init.read_text(encoding="utf-8")
         self.assertIn(
-            '"qwen3_vl_original": "Qwen3_VL_Original"',
+            '"qwen3_vl_original": "lmms_eval.models.chat.qwen3_vl_original.Qwen3_VL_Original"',
             models_text,
         )
 

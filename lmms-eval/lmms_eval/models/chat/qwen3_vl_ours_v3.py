@@ -636,17 +636,6 @@ def _make_fetp_forward(
         mm_token_type_ids: Optional[torch.IntTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, Qwen3VLModelOutputWithPast]:
-        is_visual_prefill = any(
-            value is not None
-            for value in (
-                pixel_values,
-                pixel_values_videos,
-                image_grid_thw,
-                video_grid_thw,
-            )
-        )
-        if is_visual_prefill or not hasattr(self, "_fetp_last_sample_artifact"):
-            self._fetp_last_sample_artifact = None
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
                 "You must specify exactly one of input_ids or inputs_embeds"
@@ -659,6 +648,8 @@ def _make_fetp_forward(
                 or past_key_values.get_seq_length() == 0
             )
         )
+        if is_prefill_stage or not hasattr(self, "_fetp_last_sample_artifact"):
+            self._fetp_last_sample_artifact = None
         if is_prefill_stage or not hasattr(self, "_fetp_last_pruning_stats"):
             self._fetp_last_pruning_stats = {}
 

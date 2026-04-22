@@ -266,6 +266,7 @@ def _slice_sequence_tensor(
 ) -> Optional[torch.Tensor]:
     if tensor is None:
         return None
+    keep_indices = _align_index_device(keep_indices, tensor)
     if tensor.ndim == 1:
         return tensor.index_select(0, keep_indices)
     if tensor.ndim == 2:
@@ -278,8 +279,22 @@ def _slice_sequence_tensor(
     return tensor
 
 
+def _align_index_device(
+    index: torch.Tensor,
+    reference: Union[torch.Tensor, torch.device],
+) -> torch.Tensor:
+    if isinstance(reference, torch.Tensor):
+        target_device = reference.device
+    else:
+        target_device = reference
+    if index.device == target_device:
+        return index
+    return index.to(target_device)
+
+
 def _slice_position_embeddings(position_embeddings, positions: torch.Tensor):
     cos, sin = position_embeddings
+    positions = _align_index_device(positions, cos)
     return cos.index_select(1, positions), sin.index_select(1, positions)
 
 
@@ -414,8 +429,12 @@ def _forward_extract(
             attn_module = layer.self_attn
             batch_size = hidden_normed.size(0)
             num_visual = visual_positions.numel()
+            layer_visual_positions = _align_index_device(
+                visual_positions,
+                hidden_normed,
+            )
 
-            visual_hidden = hidden_normed.index_select(1, visual_positions)
+            visual_hidden = hidden_normed.index_select(1, layer_visual_positions)
             visual_shape = (
                 batch_size,
                 num_visual,
@@ -431,7 +450,7 @@ def _forward_extract(
 
             visual_cos, visual_sin = _slice_position_embeddings(
                 position_embeddings,
-                visual_positions,
+                layer_visual_positions,
             )
             key_states, _ = apply_rotary_pos_emb(
                 key_states,
@@ -453,7 +472,11 @@ def _forward_extract(
                 )
                 return empty_logits, value_states.float()
 
-            text_hidden = hidden_normed.index_select(1, text_positions)
+            layer_text_positions = _align_index_device(
+                text_positions,
+                hidden_normed,
+            )
+            text_hidden = hidden_normed.index_select(1, layer_text_positions)
             text_shape = (
                 batch_size,
                 text_positions.numel(),
@@ -466,7 +489,7 @@ def _forward_extract(
 
             text_cos, text_sin = _slice_position_embeddings(
                 position_embeddings,
-                text_positions,
+                layer_text_positions,
             )
             query_states, _ = apply_rotary_pos_emb(
                 query_states,
@@ -575,7 +598,14 @@ def _make_fetp_forward(
                     if two_stage and num_visual_tokens > 1:
                         layer0 = self.language_model.layers[0]
                         hidden_normed = layer0.input_layernorm(inputs_embeds)
-                        visual_hidden = hidden_normed.index_select(1, visual_positions)
+                        stage1_visual_positions = _align_index_device(
+                            visual_positions,
+                            hidden_normed,
+                        )
+                        visual_hidden = hidden_normed.index_select(
+                            1,
+                            stage1_visual_positions,
+                        )
                         stage1_values = layer0.self_attn.v_proj(visual_hidden)[0]
                         stage1_keep = _diversity_prune(
                             stage1_values,
@@ -588,7 +618,13 @@ def _make_fetp_forward(
                         keep_indices = torch.cat(
                             [
                                 non_visual_positions,
-                                visual_positions.index_select(0, stage1_keep),
+                                visual_positions.index_select(
+                                    0,
+                                    _align_index_device(
+                                        stage1_keep,
+                                        visual_positions,
+                                    ),
+                                ),
                             ],
                             dim=0,
                         ).sort().values
@@ -604,7 +640,10 @@ def _make_fetp_forward(
                             dim=1,
                             index=gather_index,
                         )
-                        input_ids = input_ids.index_select(1, keep_indices)
+                        input_ids = input_ids.index_select(
+                            1,
+                            _align_index_device(keep_indices, input_ids),
+                        )
                         attention_mask = _slice_sequence_tensor(attention_mask, keep_indices)
                         position_ids = _slice_sequence_tensor(position_ids, keep_indices)
 
@@ -675,7 +714,10 @@ def _make_fetp_forward(
                         )
                         keep_visual_positions = visual_positions.index_select(
                             0,
-                            keep_within_candidate,
+                            _align_index_device(
+                                keep_within_candidate,
+                                visual_positions,
+                            ),
                         )
                         score_query_tokens = int(text_positions.numel())
                         score_heads = int(text_to_vis_logits.shape[1])
@@ -722,17 +764,26 @@ def _make_fetp_forward(
                         )
                         candidate_visual_positions = visual_positions.index_select(
                             0,
-                            candidate_local,
+                            _align_index_device(
+                                candidate_local,
+                                visual_positions,
+                            ),
                         )
 
                         if candidate_visual_positions.numel() != visual_positions.numel():
                             final_logits = text_to_vis_logits.index_select(
                                 3,
-                                candidate_local,
+                                _align_index_device(
+                                    candidate_local,
+                                    text_to_vis_logits,
+                                ),
                             )
                             final_value_states = visual_value_states.index_select(
                                 2,
-                                candidate_local,
+                                _align_index_device(
+                                    candidate_local,
+                                    visual_value_states,
+                                ),
                             )
                         else:
                             final_logits = text_to_vis_logits
@@ -752,7 +803,10 @@ def _make_fetp_forward(
                         )
                         keep_visual_positions = candidate_visual_positions.index_select(
                             0,
-                            keep_within_candidate,
+                            _align_index_device(
+                                keep_within_candidate,
+                                candidate_visual_positions,
+                            ),
                         )
                         score_query_tokens = int(coarse_text_positions.numel())
                         score_heads = (
@@ -765,6 +819,10 @@ def _make_fetp_forward(
                     keep_visual_positions = keep_visual_positions.sort().values
 
                     non_visual_positions = torch.where(input_ids[0] != self.config.image_token_id)[0]
+                    keep_visual_positions = _align_index_device(
+                        keep_visual_positions,
+                        non_visual_positions,
+                    )
                     keep_indices = torch.cat(
                         [non_visual_positions, keep_visual_positions],
                         dim=0,
@@ -777,14 +835,23 @@ def _make_fetp_forward(
                         hidden_size,
                     )
                     inputs_embeds = torch.gather(inputs_embeds, dim=1, index=gather_index)
-                    input_ids = input_ids.index_select(1, keep_indices)
+                    input_ids = input_ids.index_select(
+                        1,
+                        _align_index_device(keep_indices, input_ids),
+                    )
                     attention_mask = _slice_sequence_tensor(attention_mask, keep_indices)
                     position_ids = _slice_sequence_tensor(position_ids, keep_indices)
 
                     if image_hidden_states is not None:
                         kept_visual_mask = input_ids[0] == self.config.image_token_id
                         kept_visual_indices = torch.where(kept_visual_mask)[0]
-                        image_hidden_states = inputs_embeds.index_select(1, kept_visual_indices)
+                        image_hidden_states = inputs_embeds.index_select(
+                            1,
+                            _align_index_device(
+                                kept_visual_indices,
+                                inputs_embeds,
+                            ),
+                        )
 
                     scoring_time_s = time.perf_counter() - scoring_start
                     self._fetp_last_pruning_stats = _summarize_pruning_stats(

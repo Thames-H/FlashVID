@@ -1,6 +1,9 @@
 import unittest
 from types import SimpleNamespace
 
+import torch
+
+from lmms_eval.models.chat.internvl3_5_ours_v3 import _slice_position_embeddings
 from lmms_eval.models.chat.internvl_hf import _build_internvl_processor_kwargs
 
 
@@ -49,6 +52,25 @@ class InternVLVideoKwargsTest(unittest.TestCase):
                 "size": {"height": 448, "width": 448},
             },
         )
+
+    @unittest.skipUnless(
+        torch.cuda.is_available(),
+        "CUDA is required to validate cross-device position slicing",
+    )
+    def test_slice_position_embeddings_moves_indices_to_embedding_device(self):
+        cos = torch.randn(1, 12, 8, device="cuda")
+        sin = torch.randn(1, 12, 8, device="cuda")
+        positions = torch.tensor([1, 3, 7], device="cpu")
+
+        sliced_cos, sliced_sin = _slice_position_embeddings(
+            (cos, sin),
+            positions,
+        )
+
+        self.assertEqual(sliced_cos.device.type, "cuda")
+        self.assertEqual(sliced_sin.device.type, "cuda")
+        self.assertEqual(tuple(sliced_cos.shape), (1, 3, 8))
+        self.assertEqual(tuple(sliced_sin.shape), (1, 3, 8))
 
 
 if __name__ == "__main__":

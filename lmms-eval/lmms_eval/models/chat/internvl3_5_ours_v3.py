@@ -27,6 +27,7 @@ from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.chat.internvl_hf import (
     InternVLHf,
+    _build_internvl_processor_kwargs,
     _prepare_internvl_media_inputs,
 )
 from lmms_eval.models.model_utils.gen_metrics import log_metrics
@@ -946,27 +947,24 @@ class InternVL3_5_Ours_V3(InternVLHf):
                 videos.append(video)
             visuals = self.flatten(visuals)
             videos = self.flatten(videos)
+            visuals, videos, _ = _prepare_internvl_media_inputs(
+                visuals,
+                videos,
+            )
 
-            images_kwargs = {}
-            videos_kwargs = {}
-            if self.min_patches is not None:
-                images_kwargs["min_patches"] = self.min_patches
-            if self.max_patches is not None:
-                images_kwargs["max_patches"] = self.max_patches
-            if self.num_frames is not None:
-                videos_kwargs["num_frames"] = self.num_frames
-            if self.fps is not None:
-                videos_kwargs["fps"] = self.fps
+            images_kwargs, videos_kwargs = _build_internvl_processor_kwargs(
+                model_config=self.model.config,
+                min_patches=self.min_patches,
+                max_patches=self.max_patches,
+                num_frames=self.num_frames,
+                fps=self.fps,
+            )
 
             messages = chat_messages[0].model_dump()["messages"]
             text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             if self.accelerator.is_main_process and doc_id[0] % 100 == 0:
                 eval_logger.debug(f"Prompt for doc ID {doc_id[0]}:\n\n{text}\n")
 
-            visuals, videos, image_sizes = _prepare_internvl_media_inputs(
-                visuals,
-                videos,
-            )
             inputs = self.processor(
                 images=visuals,
                 videos=videos,

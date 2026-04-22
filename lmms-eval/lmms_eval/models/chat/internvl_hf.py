@@ -28,6 +28,72 @@ warnings.filterwarnings("ignore")
 from loguru import logger as eval_logger
 
 
+def _prepare_internvl_media_inputs(
+    visuals,
+    videos,
+) -> Tuple[Optional[list], Optional[list], List[Tuple[int, int]]]:
+    normalized_visuals = visuals or None
+    normalized_videos = videos or None
+    image_sizes: List[Tuple[int, int]] = []
+    if normalized_visuals is not None:
+        image_sizes = [
+            tuple(map(int, visual.size))
+            for visual in normalized_visuals
+            if hasattr(visual, "size")
+        ]
+    return normalized_visuals, normalized_videos, image_sizes
+
+
+def _resolve_internvl_video_size(model_config) -> Optional[dict]:
+    image_size = getattr(model_config, "image_size", None)
+    if image_size is None:
+        return None
+
+    if isinstance(image_size, (list, tuple)):
+        if len(image_size) >= 2:
+            height, width = image_size[0], image_size[1]
+        elif len(image_size) == 1:
+            height = width = image_size[0]
+        else:
+            return None
+    else:
+        height = width = image_size
+
+    try:
+        return {"height": int(height), "width": int(width)}
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_internvl_processor_kwargs(
+    *,
+    model_config,
+    min_patches: Optional[int],
+    max_patches: Optional[int],
+    num_frames: Optional[int],
+    fps: Optional[float],
+) -> Tuple[dict, dict]:
+    images_kwargs = {}
+    videos_kwargs = {}
+    if min_patches is not None:
+        images_kwargs["min_patches"] = min_patches
+    if max_patches is not None:
+        images_kwargs["max_patches"] = max_patches
+
+    if num_frames is not None:
+        videos_kwargs["num_frames"] = num_frames
+        videos_kwargs["do_sample_frames"] = True
+    if fps is not None:
+        videos_kwargs["fps"] = fps
+        videos_kwargs["do_sample_frames"] = True
+
+    video_size = _resolve_internvl_video_size(model_config)
+    if video_size is not None:
+        videos_kwargs["size"] = video_size
+
+    return images_kwargs, videos_kwargs
+
+
 def _validate_internvl_hf_checkpoint(pretrained: str) -> None:
     if not pretrained or not os.path.isdir(pretrained):
         return
@@ -53,17 +119,6 @@ def _validate_internvl_hf_checkpoint(pretrained: str) -> None:
             "'OpenGVLab/InternVL3_5-8B-HF' or a local "
             "'.../InternVL3_5-8B-HF' directory)."
         )
-
-
-def _prepare_internvl_media_inputs(visuals, videos):
-    normalized_visuals = visuals if visuals else None
-    normalized_videos = videos if videos else None
-    image_sizes = (
-        [visual.size for visual in visuals]
-        if visuals
-        else []
-    )
-    return normalized_visuals, normalized_videos, image_sizes
 
 
 @register_model("internvl_hf_chat")
@@ -285,17 +340,18 @@ class InternVLHf(lmms):
                 videos.append(video)
             visuals = self.flatten(visuals)
             videos = self.flatten(videos)
+            visuals, videos, image_sizes = _prepare_internvl_media_inputs(
+                visuals,
+                videos,
+            )
 
-            images_kwargs = {}
-            videos_kwargs = {}
-            if self.min_patches is not None:
-                images_kwargs["min_patches"] = self.min_patches
-            if self.max_patches is not None:
-                images_kwargs["max_patches"] = self.max_patches
-            if self.num_frames is not None:
-                videos_kwargs["num_frames"] = self.num_frames
-            if self.fps is not None:
-                videos_kwargs["fps"] = self.fps
+            images_kwargs, videos_kwargs = _build_internvl_processor_kwargs(
+                model_config=self.model.config,
+                min_patches=self.min_patches,
+                max_patches=self.max_patches,
+                num_frames=self.num_frames,
+                fps=self.fps,
+            )
 
             # Apply chat template
             messages = chat_messages[0].model_dump()["messages"]
@@ -303,10 +359,6 @@ class InternVLHf(lmms):
             if self.accelerator.is_main_process and doc_id[0] % 100 == 0:
                 eval_logger.debug(f"Prompt for doc ID {doc_id[0]}:\n\n{text}\n")
 
-            visuals, videos, image_sizes = _prepare_internvl_media_inputs(
-                visuals,
-                videos,
-            )
             inputs = self.processor(
                 images=visuals,
                 videos=videos,

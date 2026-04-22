@@ -119,6 +119,38 @@ class TestQwen3VLOursV3Pruning(TestCase):
             torch.allclose(chunked_deviation, full_deviation, atol=1e-6)
         )
 
+    def test_compute_fes_scores_from_compact_inputs_supports_attention_only_proxy(self):
+        text_to_vis_logits = torch.tensor(
+            [
+                [
+                    [[1.0, 0.0, -1.0], [0.0, 2.0, -2.0]],
+                    [[0.5, 1.5, -0.5], [1.0, -1.0, 0.0]],
+                ]
+            ]
+        )
+        visual_value_states = torch.tensor(
+            [
+                [
+                    [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+                    [[0.5, 1.5], [1.5, 0.5], [0.0, 2.0]],
+                ]
+            ]
+        )
+
+        scores, alpha_mean, deviation_mean = _compute_fes_scores_from_compact_inputs(
+            text_to_vis_logits=text_to_vis_logits,
+            visual_value_states=visual_value_states,
+            use_alpha=True,
+            use_deviation=False,
+        )
+
+        alpha_per_text = torch.softmax(text_to_vis_logits.float(), dim=-1).mean(dim=1)[0]
+        expected_scores = alpha_per_text.pow(2).mean(dim=0).sqrt()
+
+        self.assertTrue(torch.allclose(scores, expected_scores, atol=1e-6))
+        self.assertTrue(torch.allclose(alpha_mean, alpha_per_text.mean(dim=0), atol=1e-6))
+        self.assertEqual(tuple(deviation_mean.shape), (3,))
+
     def test_forward_extract_stops_before_full_attention_reconstruction(self):
         class FakeSelfAttention:
             head_dim = 2

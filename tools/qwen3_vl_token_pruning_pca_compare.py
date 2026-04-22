@@ -241,7 +241,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--report-samples", type=int, default=3)
     parser.add_argument("--target-layer", type=int, default=None)
-    args = parser_parse_args()
+    args = parser.parse_args()
 
     artifact_root = _resolve_layer_root(args.artifact_root, args.target_layer)
     output_dir = _resolve_layer_root(args.output_dir, args.target_layer)

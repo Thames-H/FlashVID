@@ -10,6 +10,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+def _resolve_layer_root(base_root: Path, target_layer: int | None) -> Path:
+    if target_layer is None:
+        return base_root
+
+    layer_dir = f"layer_{int(target_layer)}"
+    if base_root.name == layer_dir:
+        return base_root
+    return base_root / layer_dir
+
+
 def _load_artifacts(artifact_root: Path, method_name: str) -> Dict[Tuple[str, str], dict]:
     method_dir = artifact_root / "artifacts" / method_name
     if not method_dir.exists():
@@ -94,6 +104,34 @@ def _jaccard(a: torch.Tensor, b: torch.Tensor) -> float:
     return len(set_a & set_b) / len(union)
 
 
+def _compute_subset_groups(
+    fetp_keep: torch.Tensor,
+    attn_keep: torch.Tensor,
+    mmtok_keep: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    fetp = set(int(x) for x in fetp_keep.long().tolist())
+    attn = set(int(x) for x in attn_keep.long().tolist())
+    mmtok = set(int(x) for x in mmtok_keep.long().tolist())
+
+    all_three = fetp & attn & mmtok
+    fetp_attention = (fetp & attn) - all_three
+    fetp_mmtok = (fetp & mmtok) - all_three
+    attention_mmtok = (attn & mmtok) - all_three
+    fetp_only = fetp - attn - mmtok
+    attention_only = attn - fetp - mmtok
+    mmtok_only = mmtok - fetp - attn
+
+    return {
+        "fetp_only": torch.tensor(sorted(fetp_only), dtype=torch.long),
+        "attention_only": torch.tensor(sorted(attention_only), dtype=torch.long),
+        "mmtok_only": torch.tensor(sorted(mmtok_only), dtype=torch.long),
+        "fetp_attention": torch.tensor(sorted(fetp_attention), dtype=torch.long),
+        "fetp_mmtok": torch.tensor(sorted(fetp_mmtok), dtype=torch.long),
+        "attention_mmtok": torch.tensor(sorted(attention_mmtok), dtype=torch.long),
+        "all_three": torch.tensor(sorted(all_three), dtype=torch.long),
+    }
+
+
 def _plot_subset_pca(
     coords: torch.Tensor,
     fetp_keep: torch.Tensor,
@@ -103,10 +141,46 @@ def _plot_subset_pca(
     output_path: Path,
 ) -> None:
     fig, ax = plt.subplots(figsize=(7, 6))
-    ax.scatter(coords[:, 0], coords[:, 1], s=14, c="#bdbdbd", alpha=0.45, label="All visual tokens")
-    ax.scatter(coords[fetp_keep, 0], coords[fetp_keep, 1], s=24, c="#d73027", alpha=0.90, label="FETP")
-    ax.scatter(coords[attn_keep, 0], coords[attn_keep, 1], s=24, c="#4575b4", alpha=0.85, label="Attention-only")
-    ax.scatter(coords[mmtok_keep, 0], coords[mmtok_keep, 1], s=24, c="#1a9850", alpha=0.85, label="MMTok")
+    subset_groups = _compute_subset_groups(fetp_keep, attn_keep, mmtok_keep)
+
+    ax.scatter(coords[:, 0], coords[:, 1], s=14, c="#bdbdbd", alpha=0.35, label="All visual tokens", zorder=1)
+
+    group_styles = [
+        ("fetp_only", "FETP only", dict(marker="o", s=42, c="#d73027", alpha=0.92, linewidths=0.8, edgecolors="white", zorder=4)),
+        (
+            "attention_only",
+            "Attention-only only",
+            dict(marker="s", s=42, c="#4575b4", alpha=0.90, linewidths=0.8, edgecolors="white", zorder=4),
+        ),
+        ("mmtok_only", "MMTok only", dict(marker="^", s=50, c="#1a9850", alpha=0.90, linewidths=0.8, edgecolors="white", zorder=4)),
+        (
+            "fetp_attention",
+            "FETP ∩ Attention",
+            dict(marker="D", s=58, facecolors="white", edgecolors="#984ea3", linewidths=1.8, alpha=1.0, zorder=5),
+        ),
+        (
+            "fetp_mmtok",
+            "FETP ∩ MMTok",
+            dict(marker="P", s=64, facecolors="white", edgecolors="#ff7f00", linewidths=1.8, alpha=1.0, zorder=5),
+        ),
+        (
+            "attention_mmtok",
+            "Attention ∩ MMTok",
+            dict(marker="X", s=64, facecolors="white", edgecolors="#4daf4a", linewidths=1.8, alpha=1.0, zorder=5),
+        ),
+        ("all_three", "All three", dict(marker="*", s=110, c="#111111", alpha=0.95, linewidths=0.6, edgecolors="white", zorder=6)),
+    ]
+
+    for group_name, label, style in group_styles:
+        indices = subset_groups[group_name]
+        if indices.numel() == 0:
+            continue
+        ax.scatter(
+            coords[indices, 0],
+            coords[indices, 1],
+            label=f"{label} ({indices.numel()})",
+            **style,
+        )
     ax.set_title(title)
     ax.set_xlabel("PC1")
     ax.set_ylabel("PC2")
@@ -166,15 +240,19 @@ def main() -> None:
     parser.add_argument("--artifact-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--report-samples", type=int, default=3)
-    args = parser.parse_args()
+    parser.add_argument("--target-layer", type=int, default=None)
+    args = parser_parse_args()
 
-    plots_dir = args.output_dir / "plots"
+    artifact_root = _resolve_layer_root(args.artifact_root, args.target_layer)
+    output_dir = _resolve_layer_root(args.output_dir, args.target_layer)
+
+    plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     matched_rows: List[dict] = []
     report_keys: List[str] = []
 
-    for (task_name, doc_id), fetp_artifact, mmtok_artifact in _iter_matched_samples(args.artifact_root):
+    for (task_name, doc_id), fetp_artifact, mmtok_artifact in _iter_matched_samples(artifact_root):
         visual_embeddings = fetp_artifact["visual_embeddings"].float()
         coords = _compute_pca_coords(visual_embeddings)
 
@@ -216,18 +294,18 @@ def main() -> None:
             "jaccard_fetp_mmtok": _jaccard(fetp_keep, mmtok_keep),
             "jaccard_attn_mmtok": _jaccard(attn_keep, mmtok_keep),
             "question_text": question_text,
-            "subset_plot": str(subset_plot.relative_to(args.output_dir)),
-            "landscape_plot": str(landscape_plot.relative_to(args.output_dir)),
+            "subset_plot": str(subset_plot.relative_to(output_dir)),
+            "landscape_plot": str(landscape_plot.relative_to(output_dir)),
         }
         matched_rows.append(metrics)
         if len(report_keys) < args.report_samples:
             report_keys.append(sample_slug)
 
-    summary_path = args.output_dir / "summary.json"
+    summary_path = output_dir / "summary.json"
     summary_path.write_text(
         json.dumps(
             {
-                "artifact_root": str(args.artifact_root),
+                "artifact_root": str(artifact_root),
                 "num_matched_samples": len(matched_rows),
                 "samples": matched_rows,
             },
@@ -240,7 +318,7 @@ def main() -> None:
     report_lines = [
         "# Qwen3-VL Token Pruning PCA Compare",
         "",
-        f"- Artifact root: `{args.artifact_root}`",
+        f"- Artifact root: `{artifact_root}`",
         f"- Matched samples: `{len(matched_rows)}`",
         "",
         "## Summary Table",
@@ -269,7 +347,7 @@ def main() -> None:
             ]
         )
 
-    report_path = args.output_dir / "report.md"
+    report_path = output_dir / "report.md"
     report_path.write_text("\n".join(report_lines), encoding="utf-8")
     print(f"Wrote summary to {summary_path}")
     print(f"Wrote report to {report_path}")

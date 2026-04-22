@@ -30,12 +30,13 @@ RETENTION_RATIO="${RETENTION_RATIO:-0.20}"
 TARGET_LAYER="${TARGET_LAYER:-20}"
 TEXT_CHUNK_SIZE="${TEXT_CHUNK_SIZE:-32}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
+LAYER_OUTPUT_PATH="${OUTPUT_PATH}/layer_${TARGET_LAYER}"
 
 COMMON_ARGS="pretrained=${PRETRAINED},max_num_frames=8,attn_implementation=${ATTN_IMPLEMENTATION}"
-FETP_ARGS="${COMMON_ARGS},retention_ratio=${RETENTION_RATIO},scoring_method=full,target_layer=${TARGET_LAYER},use_alpha=True,use_deviation=True,two_stage=False,text_chunk_size=${TEXT_CHUNK_SIZE},stats_output_path=${OUTPUT_PATH}"
-MMTOK_ARGS="${COMMON_ARGS},retain_ratio=${RETENTION_RATIO},stats_output_path=${OUTPUT_PATH}"
+FETP_ARGS="${COMMON_ARGS},retention_ratio=${RETENTION_RATIO},scoring_method=full,target_layer=${TARGET_LAYER},use_alpha=True,use_deviation=True,two_stage=False,text_chunk_size=${TEXT_CHUNK_SIZE},stats_output_path=${LAYER_OUTPUT_PATH}"
+MMTOK_ARGS="${COMMON_ARGS},retain_ratio=${RETENTION_RATIO},stats_output_path=${LAYER_OUTPUT_PATH}"
 
-mkdir -p "${OUTPUT_PATH}"
+mkdir -p "${LAYER_OUTPUT_PATH}"
 
 for task in "${TASKS[@]}"; do
     echo "[1/3] FETP artifact export for task=${task}"
@@ -51,7 +52,7 @@ for task in "${TASKS[@]}"; do
         --log_samples \
         --predict_only \
         --log_samples_suffix "qwen3_vl_fetp_pca_compare" \
-        --output_path "${OUTPUT_PATH}"
+        --output_path "${LAYER_OUTPUT_PATH}"
 
     echo "[2/3] MMTok artifact export for task=${task}"
     accelerate launch \
@@ -66,10 +67,10 @@ for task in "${TASKS[@]}"; do
         --log_samples \
         --predict_only \
         --log_samples_suffix "qwen3_vl_mmtok_pca_compare" \
-        --output_path "${OUTPUT_PATH}"
+        --output_path "${LAYER_OUTPUT_PATH}"
 done
 
 echo "[3/3] Building PCA plots and markdown report"
 python "${PROJECT_ROOT}/tools/qwen3_vl_token_pruning_pca_compare.py" \
-    --artifact-root "${OUTPUT_PATH}" \
-    --output-dir "${OUTPUT_PATH}/pca_compare"
+    --artifact-root "${LAYER_OUTPUT_PATH}" \
+    --output-dir "${LAYER_OUTPUT_PATH}/pca_compare"

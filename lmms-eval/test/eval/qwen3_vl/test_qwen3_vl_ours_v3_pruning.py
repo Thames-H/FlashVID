@@ -6,6 +6,7 @@ import torch
 
 from lmms_eval.models.chat.qwen3_vl_ours_v3 import (
     _aggregate_anchor_scores,
+    _build_fes_sample_artifact,
     _compute_fes_scores_from_compact_inputs,
     _compute_fes_scores_from_visual_logits,
     _forward_extract,
@@ -150,6 +151,27 @@ class TestQwen3VLOursV3Pruning(TestCase):
         self.assertTrue(torch.allclose(scores, expected_scores, atol=1e-6))
         self.assertTrue(torch.allclose(alpha_mean, alpha_per_text.mean(dim=0), atol=1e-6))
         self.assertEqual(tuple(deviation_mean.shape), (3,))
+
+    def test_build_fes_sample_artifact_accepts_missing_stage1_count(self):
+        artifact = _build_fes_sample_artifact(
+            question_text="what is in the image?",
+            visual_embeddings=torch.randn(3, 4),
+            visual_value_states=torch.randn(3, 4),
+            fetp_scores=torch.tensor([0.3, 0.1, 0.2]),
+            attention_only_scores=torch.tensor([0.4, 0.2, 0.1]),
+            fetp_keep_local=torch.tensor([0, 2]),
+            attention_only_keep_local=torch.tensor([0, 1]),
+            alpha_mean=torch.tensor([0.4, 0.3, 0.3]),
+            deviation_mean=torch.tensor([0.1, 0.2, 0.3]),
+            num_keep=2,
+            target_layer=20,
+            scoring_method="full",
+            n_visual_tokens_original=3,
+            n_visual_tokens_after_stage1=None,
+        )
+
+        self.assertIsNone(artifact["metadata"]["n_visual_tokens_after_stage1"])
+        self.assertEqual(artifact["metadata"]["n_visual_tokens_scored"], 3)
 
     def test_forward_extract_stops_before_full_attention_reconstruction(self):
         class FakeSelfAttention:

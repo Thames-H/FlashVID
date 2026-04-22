@@ -14,6 +14,12 @@ from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, is_torchdynamo_compiling
 
 
+def _cpu_tensor(tensor: Optional[torch.Tensor]):
+    if tensor is None:
+        return None
+    return tensor.detach().cpu()
+
+
 def _flatten_visual_tensor(hidden_states):
     if hidden_states is None:
         return None
@@ -222,6 +228,7 @@ class Qwen3_VL_MMTok(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, Qwen3VLModelOutputWithPast]:
+        self._mmtok_last_sample_artifact = None
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
                 "You must specify exactly one of input_ids or inputs_embeds"
@@ -439,6 +446,11 @@ class Qwen3_VL_MMTok(nn.Module):
                     selected_video_embeds = video_embeds
 
             if image_keep_local is not None or video_keep_local is not None:
+                artifact_visual_embeds = None
+                artifact_keep_local = None
+                artifact_initial_gain = None
+                artifact_combined_rows = None
+
                 if image_keep_local is not None:
                     image_positions = torch.where(
                         input_ids[0] == self.config.image_token_id
@@ -446,10 +458,24 @@ class Qwen3_VL_MMTok(nn.Module):
                     if image_positions.numel() != image_embeds.shape[0]:
                         raise ValueError(
                             "Image placeholder count does not match image embeds."
-                        )
+                    )
                     inputs_embeds[:, image_positions[image_keep_local]] = (
                         selected_image_embeds
                     )
+                    if video_keep_local is None:
+                        selection_info = getattr(
+                            self._mmtok_core.token_selector,
+                            "last_selection_info",
+                            {},
+                        )
+                        artifact_visual_embeds = image_embeds
+                        artifact_keep_local = image_keep_local
+                        artifact_initial_gain = selection_info.get(
+                            "initial_marginal_gain"
+                        )
+                        artifact_combined_rows = selection_info.get(
+                            "combined_rows"
+                        )
 
                 if video_keep_local is not None:
                     video_positions = torch.where(
@@ -458,10 +484,24 @@ class Qwen3_VL_MMTok(nn.Module):
                     if video_positions.numel() != video_embeds.shape[0]:
                         raise ValueError(
                             "Video placeholder count does not match video embeds."
-                        )
+                    )
                     inputs_embeds[:, video_positions[video_keep_local]] = (
                         selected_video_embeds
                     )
+                    if image_keep_local is None:
+                        selection_info = getattr(
+                            self._mmtok_core.token_selector,
+                            "last_selection_info",
+                            {},
+                        )
+                        artifact_visual_embeds = video_embeds
+                        artifact_keep_local = video_keep_local
+                        artifact_initial_gain = selection_info.get(
+                            "initial_marginal_gain"
+                        )
+                        artifact_combined_rows = selection_info.get(
+                            "combined_rows"
+                        )
 
                 keep_global_indices = _build_keep_indices(
                     input_ids[0],
@@ -492,6 +532,39 @@ class Qwen3_VL_MMTok(nn.Module):
                     keep_global_indices,
                     deepstack_visual_embeds,
                 )
+
+                if artifact_visual_embeds is not None and artifact_keep_local is not None:
+                    if artifact_initial_gain is None:
+                        artifact_initial_gain = torch.ones(
+                            artifact_visual_embeds.shape[0],
+                            dtype=torch.float32,
+                        )
+                    self._mmtok_last_sample_artifact = {
+                        "method": "mmtok",
+                        "question_text": question,
+                        "visual_embeddings": _cpu_tensor(
+                            artifact_visual_embeds.float()
+                        ),
+                        "scores": {
+                            "initial_marginal_gain": _cpu_tensor(
+                                artifact_initial_gain.float()
+                            ),
+                        },
+                        "selection": {
+                            "mmtok_keep_local": _cpu_tensor(
+                                artifact_keep_local.long()
+                            ),
+                            "num_keep": int(artifact_keep_local.numel()),
+                        },
+                        "metadata": {
+                            "combined_rows": int(artifact_combined_rows)
+                            if artifact_combined_rows is not None
+                            else None,
+                            "n_visual_tokens_scored": int(
+                                artifact_visual_embeds.shape[0]
+                            ),
+                        },
+                    }
 
         outputs = self.language_model(
             input_ids=None,

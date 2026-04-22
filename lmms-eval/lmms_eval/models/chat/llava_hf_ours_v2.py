@@ -26,7 +26,10 @@ from lmms_eval import utils
 from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.model_utils.gen_metrics import log_metrics
-from lmms_eval.models.chat.llava_hf import _prepare_llava_media_inputs
+from lmms_eval.models.chat.llava_hf import (
+    _build_llava_processor_kwargs,
+    _prepare_llava_media_inputs,
+)
 from lmms_eval.models.simple.llava_hf import LlavaHf as LlavaHfSimple
 from lmms_eval.protocol import ChatMessages
 
@@ -571,9 +574,17 @@ class LlavaHfOursV2(LlavaHfSimple):
                 visuals,
                 videos,
             )
+            images_kwargs, videos_kwargs = _build_llava_processor_kwargs(
+                self.model.config,
+                self.max_frames_num,
+            )
             inputs = self._image_processor(
-                images=visuals, videos=videos, text=text,
+                images=visuals,
+                videos=videos,
+                text=text,
                 return_tensors="pt",
+                **images_kwargs,
+                **videos_kwargs,
             ).to(self._device, self.model.dtype)
 
             gen_kwargs = all_gen_kwargs[0]

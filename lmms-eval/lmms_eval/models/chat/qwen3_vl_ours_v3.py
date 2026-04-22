@@ -47,6 +47,10 @@ from .qwen3_vl_ours_v2 import (
     _slice_position_embeddings,
     _unpack_visual_outputs,
 )
+from .qwen3_vl_visual_compare_utils import (
+    attach_visual_compare_metadata,
+    build_visual_compare_metadata,
+)
 
 process_vision_info, _has_qwen_vl = optional_import(
     "qwen_vl_utils", "process_vision_info"
@@ -1431,6 +1435,12 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                     return_tensors="pt",
                 )
 
+            image_grid_thw_for_artifact = None
+            if "image_grid_thw" in inputs and inputs["image_grid_thw"] is not None:
+                image_grid_thw_for_artifact = (
+                    inputs["image_grid_thw"].detach().cpu().clone()
+                )
+
             inputs.pop("token_type_ids", None)
 
             if self.device_map == "auto":
@@ -1522,6 +1532,23 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                     artifact_to_write["doc_id"] = req.doc_id
                     artifact_to_write["question_text"] = context
                     artifact_to_write["model_response"] = clean_ans
+                    artifact_to_write = attach_visual_compare_metadata(
+                        artifact_to_write,
+                        build_visual_compare_metadata(
+                            image_inputs=image_inputs,
+                            video_inputs=video_inputs,
+                            image_grid_thw=image_grid_thw_for_artifact,
+                            n_visual_tokens_scored=artifact_to_write[
+                                "metadata"
+                            ]["n_visual_tokens_scored"],
+                            spatial_merge_size=int(
+                                getattr(self.model.visual, "spatial_merge_size", 1)
+                            ),
+                        ),
+                        target_layer=artifact_to_write["metadata"].get(
+                            "target_layer"
+                        ),
+                    )
                     artifact_path = _write_sample_artifact(
                         stats_output_path=self.stats_output_path,
                         method_name="fetp",

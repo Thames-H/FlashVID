@@ -70,7 +70,12 @@ for task in "${TASKS[@]}"; do
         --output_path "${LAYER_OUTPUT_PATH}"
 done
 
-echo "[3/3] Building PCA plots and markdown report"
+echo "[3/4] Building visual compare report"
+python "${PROJECT_ROOT}/tools/qwen3_vl_token_pruning_visual_compare.py" \
+    --artifact-root "${LAYER_OUTPUT_PATH}" \
+    --output-dir "${LAYER_OUTPUT_PATH}/visual_compare"
+
+echo "[4/4] Building PCA plots and markdown report"
 python "${PROJECT_ROOT}/tools/qwen3_vl_token_pruning_pca_compare.py" \
     --artifact-root "${LAYER_OUTPUT_PATH}" \
     --output-dir "${LAYER_OUTPUT_PATH}/pca_compare"

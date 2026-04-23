@@ -58,3 +58,4 @@ class TestVideoBenchmarkScripts(TestCase):
         self.assertIn('low_cpu_mem_usage=$LOW_CPU_MEM_USAGE', text)
         self.assertIn('"videomme"', text)
         self.assertIn('"longvideobench_val_v"', text)
+        self.assertNotIn("<<<", text)

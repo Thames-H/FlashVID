@@ -324,7 +324,29 @@ class LlavaOnevision_MMTok(nn.Module):
             )
 
         try:
-            self._sink_analysis_last_export = None
+            has_visual_inputs = (
+                pixel_values is not None or pixel_values_videos is not None
+            )
+            if has_visual_inputs:
+                self._sink_analysis_last_export = None
+            else:
+                return _forward_without_mmtok(
+                    self,
+                    input_ids=input_ids,
+                    pixel_values=pixel_values,
+                    image_sizes=image_sizes,
+                    pixel_values_videos=pixel_values_videos,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    vision_feature_layer=vision_feature_layer,
+                    vision_feature_select_strategy=vision_feature_select_strategy,
+                    vision_aspect_ratio=vision_aspect_ratio,
+                    batch_num_images=batch_num_images,
+                    use_cache=use_cache,
+                    **kwargs,
+                )
             image_keep_local = None
             video_keep_local = None
             original_image_feature_count = None

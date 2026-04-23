@@ -21,7 +21,7 @@ from sink_analysis.analyze.exp5_ablation import (
     build_ablation_selections,
     plot_ablation,
 )
-from sink_analysis.analyze.exp6_summary import generate_summary_table
+from sink_analysis.analyze.exp6_summary import generate_summary_tables_by_ratio
 from sink_analysis.analyze.report import (
     plot_summary_table,
     write_report,
@@ -44,7 +44,7 @@ ABLATION_CONFIG_ALIASES = {
     "A: ATTENTION-ONLY": "A: Attention",
     "B": "B: Attention-Sink",
     "B: ATTENTION-SINK": "B: Attention-Sink",
-    "B: ATTENTION−SINK": "B: Attention-Sink",
+    "B: ATTENTION鈭扴INK": "B: Attention-Sink",
     "C": "C: FETP",
     "C: FETP": "C: FETP",
     "D": "D: FETP+Sink",
@@ -235,7 +235,7 @@ def run_analyze(args: argparse.Namespace) -> int:
     figure_paths.append(path)
     fig.clf()
 
-    summary_table = generate_summary_table(artifacts_by_model)
+    summary_table = generate_summary_tables_by_ratio(artifacts_by_model)
     _, summary_json = write_summary_outputs(paths.data_root, summary_table)
 
     per_sample_stats = _build_per_sample_stats(artifacts_by_model)

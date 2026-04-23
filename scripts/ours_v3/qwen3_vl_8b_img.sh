@@ -5,46 +5,38 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
-NUM_PROCESSES="${NUM_PROCESSES:-4}"
-MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-18891}"
-BATCH_SIZE="${BATCH_SIZE:-1}"
-LOG_SAMPLES_SUFFIX="${LOG_SAMPLES_SUFFIX:-qwen3_vl_ours_v3_8b_img}"
-OUTPUT_PATH="${OUTPUT_PATH:-./logs/ours_v3_qwen3_vl_8b_img}"
+# Editable configuration. Change values here instead of exporting env vars.
+CUDA_VISIBLE_DEVICES="0,1,2,3"
+NUM_PROCESSES=4
+MAIN_PROCESS_PORT=18891
+BATCH_SIZE=1
+LOG_SAMPLES_SUFFIX="qwen3_vl_ours_v3_8b_img"
+OUTPUT_PATH="./logs/ours_v3_qwen3_vl_8b_img"
+TASKS=("gqa" "scienceqa_img" "mmbench_en" "mme" "pope" "ocrbench")
 
-# Image evaluation benchmarks.
-if [[ -n "${TASKS_CSV:-}" ]]; then
-    IFS=',' read -r -a TASKS <<< "${TASKS_CSV}"
-else
-    TASKS=("gqa" "scienceqa_img" "mmbench_en" "mme" "pope" "ocrbench")
-fi
-
-# Pretrained model path.
-AUTODL_MODEL_PATH="${HOME}/autodl-tmp/Qwen3-VL-8B-Instruct"
+AUTODL_MODEL_PATH="$HOME/autodl-tmp/Qwen3-VL-8B-Instruct"
 DEFAULT_PRETRAINED="Qwen/Qwen3-VL-8B-Instruct"
+PRETRAINED="$DEFAULT_PRETRAINED"
+
+RETENTION_RATIOS=(0.05 0.10 0.20)
+SCORING_METHOD="full"
+SHALLOW_LAYERS=4
+TARGET_LAYER=20
+USE_ALPHA="true"
+USE_DEVIATION="true"
+TWO_STAGE="false"
+TEXT_CHUNK_SIZE=32
+STATS_OUTPUT_PATH=""
+
+MAX_NUM_FRAMES=8
+ATTN_IMPLEMENTATION="flash_attention_2"
+
 if [[ -d "$AUTODL_MODEL_PATH" ]]; then
-    DEFAULT_PRETRAINED="$AUTODL_MODEL_PATH"
+    PRETRAINED="$AUTODL_MODEL_PATH"
 fi
-PRETRAINED="${PRETRAINED:-$DEFAULT_PRETRAINED}"
 
-# FETP-v3 arguments.
-if [[ -n "${RETENTION_RATIOS_CSV:-}" ]]; then
-    IFS=',' read -r -a RETENTION_RATIOS <<< "${RETENTION_RATIOS_CSV}"
-else
-    RETENTION_RATIOS=(0.05 0.10 0.20)
-fi
-SCORING_METHOD="${SCORING_METHOD:-full}"
-SHALLOW_LAYERS="${SHALLOW_LAYERS:-4}"
-TARGET_LAYER="${TARGET_LAYER:-20}"
-USE_ALPHA="${USE_ALPHA:-true}"
-USE_DEVIATION="${USE_DEVIATION:-true}"
-TWO_STAGE="${TWO_STAGE:-false}"
-TEXT_CHUNK_SIZE="${TEXT_CHUNK_SIZE:-32}"
-STATS_OUTPUT_PATH="${STATS_OUTPUT_PATH:-}"
+export CUDA_VISIBLE_DEVICES
 
-# Model arguments.
-MAX_NUM_FRAMES="${MAX_NUM_FRAMES:-8}"
-ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_num_frames=$MAX_NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE"
 if [[ -n "$STATS_OUTPUT_PATH" ]]; then
     BASE_MODEL_ARGS="$BASE_MODEL_ARGS,stats_output_path=$STATS_OUTPUT_PATH"

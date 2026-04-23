@@ -65,7 +65,20 @@ class TestSinkAnalysisAnalysisRobustness(TestCase):
 
         frame = generate_summary_table({"llava-onevision": [artifact]}, keep_ratio="50%")
 
+        self.assertEqual(frame.iloc[0]["Sink Retention (MMTok)"], "NA")
         self.assertEqual(frame.iloc[0]["IoU (FETP vs MMTok)"], "NA")
+
+    def test_generate_summary_table_includes_mmtok_sink_retention(self):
+        artifact = _build_artifact_without_mmtok()
+        artifact["selections"]["50%"]["mmtok"] = {
+            "indices": torch.tensor([0, 2], dtype=torch.long),
+            "scores": torch.tensor([0.9, 0.8], dtype=torch.float32),
+        }
+
+        frame = generate_summary_table({"llava-onevision": [artifact]}, keep_ratio="50%")
+
+        self.assertIn("Sink Retention (MMTok)", frame.columns)
+        self.assertEqual(frame.iloc[0]["Sink Retention (MMTok)"], "100.0%")
 
     def test_generate_summary_tables_by_ratio_adds_keep_ratio_rows(self):
         artifact = _build_artifact_without_mmtok()

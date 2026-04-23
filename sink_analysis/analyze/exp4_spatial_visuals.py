@@ -38,8 +38,13 @@ def render_patch_overlay(
 def select_representative_samples(artifacts: list[dict], keep_ratio: str = "50%", n: int = 3) -> list[dict]:
     scored = []
     for artifact in artifacts:
-        fetp = set(artifact["selections"][keep_ratio]["fetp"]["indices"].tolist())
-        attention = set(artifact["selections"][keep_ratio]["attention"]["indices"].tolist())
+        ratio_selection = artifact.get("selections", {}).get(keep_ratio, {})
+        fetp_selection = ratio_selection.get("fetp")
+        attention_selection = ratio_selection.get("attention")
+        if fetp_selection is None or attention_selection is None:
+            continue
+        fetp = set(fetp_selection["indices"].tolist())
+        attention = set(attention_selection["indices"].tolist())
         union = fetp | attention
         iou = len(fetp & attention) / max(1, len(union))
         scored.append((iou, artifact))
@@ -50,7 +55,7 @@ def select_representative_samples(artifacts: list[dict], keep_ratio: str = "50%"
 def render_full_comparison(artifact: dict, keep_ratio: str = "50%"):
     image = artifact["image_preview"]
     patch_mapping = artifact["patch_mapping"]
-    selections = artifact["selections"][keep_ratio]
+    selections = artifact.get("selections", {}).get(keep_ratio, {})
     sink_mask, _, _ = identify_sink_tokens(
         artifact["alpha"],
         artifact["values"],
@@ -67,20 +72,23 @@ def render_full_comparison(artifact: dict, keep_ratio: str = "50%"):
         ("fetp", (46, 204, 113), "FETP"),
     ]
     for col, (method, color, title) in enumerate(methods, start=1):
+        selection = selections.get(method)
+        indices = selection["indices"].tolist() if selection is not None else []
         overlay = render_patch_overlay(
             image,
             patch_mapping,
-            selections[method]["indices"].tolist(),
+            indices,
             color,
         )
         axes[0, col].imshow(overlay)
-        axes[0, col].set_title(title)
+        axes[0, col].set_title(title if selection is not None else f"{title} (missing)")
 
     sink_indices = torch.where(sink_mask)[0].tolist()
     axes[1, 0].imshow(render_patch_overlay(image, patch_mapping, sink_indices, (255, 0, 0)))
     axes[1, 0].set_title("Sink Tokens")
 
-    attention_idx = selections["attention"]["indices"].tolist()
+    attention_selection = selections.get("attention")
+    attention_idx = attention_selection["indices"].tolist() if attention_selection is not None else []
     attention_sink = [idx for idx in attention_idx if sink_mask[idx]]
     attention_nonsink = [idx for idx in attention_idx if not sink_mask[idx]]
     overlay = render_patch_overlay(image, patch_mapping, attention_nonsink, (52, 152, 219))
@@ -88,7 +96,8 @@ def render_full_comparison(artifact: dict, keep_ratio: str = "50%"):
     axes[1, 1].imshow(overlay)
     axes[1, 1].set_title("Attention sink split")
 
-    fetp_idx = selections["fetp"]["indices"].tolist()
+    fetp_selection = selections.get("fetp")
+    fetp_idx = fetp_selection["indices"].tolist() if fetp_selection is not None else []
     fetp_sink = [idx for idx in fetp_idx if sink_mask[idx]]
     fetp_nonsink = [idx for idx in fetp_idx if not sink_mask[idx]]
     overlay = render_patch_overlay(image, patch_mapping, fetp_nonsink, (46, 204, 113))
@@ -104,4 +113,3 @@ def render_full_comparison(artifact: dict, keep_ratio: str = "50%"):
         axis.axis("off")
     fig.tight_layout()
     return fig
-

@@ -61,3 +61,6 @@ class TestSinkAnalysisScripts(TestCase):
         self.assertIn("merge.sh", run_text)
         self.assertIn("analyze.sh", run_text)
         self.assertIn("/root/autodl-tmp/llava-onevision-qwen2-7b-ov-hf", run_text)
+        self.assertIn('bash "${SINK_SCRIPT_DIR}/collect_llava.sh"', run_text)
+        self.assertIn('bash "${SINK_SCRIPT_DIR}/merge.sh"', run_text)
+        self.assertIn('bash "${SINK_SCRIPT_DIR}/analyze.sh"', run_text)

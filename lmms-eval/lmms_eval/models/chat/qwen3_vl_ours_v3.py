@@ -37,11 +37,7 @@ from lmms_eval.models.simple.qwen3_vl import Qwen3_VL as Qwen3_VLSimple
 from lmms_eval.protocol import ChatMessages
 
 from .qwen3_vl_ours_v2 import (
-    _align_index_device,
-    _build_qwen_message_video_kwargs,
-    _build_qwen_processor_video_kwargs,
     _get_suffix_text_positions,
-    _maybe_merge_qwen_visual_outputs,
     _merge_visual_inputs,
     _slice_attention_mask,
     _slice_position_embeddings,
@@ -257,14 +253,8 @@ def _compute_fes_scores_from_visual_logits(
     if visual_positions.numel() == 0:
         return torch.empty(0, device=value_states.device)
 
-    compact_logits = attn_logits.index_select(
-        3,
-        _align_index_device(visual_positions, attn_logits),
-    )
-    compact_values = value_states.index_select(
-        2,
-        _align_index_device(visual_positions, value_states),
-    )
+    compact_logits = attn_logits.index_select(3, visual_positions)
+    compact_values = value_states.index_select(2, visual_positions)
     scores, _, _ = _compute_fes_scores_from_compact_inputs(
         text_to_vis_logits=compact_logits,
         visual_value_states=compact_values,
@@ -334,23 +324,13 @@ def _slice_visual_inputs(
         return visual_pos_masks, deepstack_visual_embeds
 
     original_visual_positions = torch.where(visual_pos_masks[0])[0]
-    keep_indices_for_visual_positions = _align_index_device(
-        keep_global_indices,
-        original_visual_positions,
-    )
     joint_visual_keep_indices = torch.where(
-        torch.isin(
-            original_visual_positions,
-            keep_indices_for_visual_positions,
-        )
+        torch.isin(original_visual_positions, keep_global_indices)
     )[0]
-    visual_pos_masks = visual_pos_masks[
-        :,
-        _align_index_device(keep_global_indices, visual_pos_masks),
-    ]
+    visual_pos_masks = visual_pos_masks[:, keep_global_indices]
     if deepstack_visual_embeds is not None:
         deepstack_visual_embeds = [
-            embed[_align_index_device(joint_visual_keep_indices, embed)]
+            embed[joint_visual_keep_indices]
             for embed in deepstack_visual_embeds
         ]
     return visual_pos_masks, deepstack_visual_embeds
@@ -403,15 +383,8 @@ def _forward_extract(
 
             attn_module = layer.self_attn
             bsz, _, _ = hidden_normed.size()
-            layer_visual_positions = _align_index_device(
-                visual_positions,
-                hidden_normed,
-            )
 
-            visual_hidden = hidden_normed.index_select(
-                1,
-                layer_visual_positions,
-            )
+            visual_hidden = hidden_normed.index_select(1, visual_positions)
             visual_shape = (
                 bsz,
                 visual_positions.numel(),
@@ -426,7 +399,7 @@ def _forward_extract(
 
             visual_cos, visual_sin = _slice_position_embeddings(
                 position_embeddings,
-                layer_visual_positions,
+                visual_positions,
             )
             key_states, _ = apply_rotary_pos_emb(
                 key_states,
@@ -446,14 +419,7 @@ def _forward_extract(
                     visual_positions.numel(),
                 ).float()
             else:
-                layer_text_positions = _align_index_device(
-                    text_positions,
-                    hidden_normed,
-                )
-                text_hidden = hidden_normed.index_select(
-                    1,
-                    layer_text_positions,
-                )
+                text_hidden = hidden_normed.index_select(1, text_positions)
                 text_shape = (
                     bsz,
                     text_positions.numel(),
@@ -465,7 +431,7 @@ def _forward_extract(
 
                 text_cos, text_sin = _slice_position_embeddings(
                     position_embeddings,
-                    layer_text_positions,
+                    text_positions,
                 )
                 query_states, _ = apply_rotary_pos_emb(
                     query_states,
@@ -594,12 +560,6 @@ def _make_fetp_forward(
             image_embeds, deepstack_image_embeds = _unpack_visual_outputs(
                 image_outputs
             )
-            image_embeds, deepstack_image_embeds = _maybe_merge_qwen_visual_outputs(
-                self,
-                image_embeds,
-                deepstack_image_embeds,
-                image_grid_thw,
-            )
             image_embeds = image_embeds.to(
                 inputs_embeds.device, inputs_embeds.dtype
             )
@@ -619,12 +579,6 @@ def _make_fetp_forward(
             )
             video_embeds, deepstack_video_embeds = _unpack_visual_outputs(
                 video_outputs
-            )
-            video_embeds, deepstack_video_embeds = _maybe_merge_qwen_visual_outputs(
-                self,
-                video_embeds,
-                deepstack_video_embeds,
-                video_grid_thw,
             )
             video_embeds = video_embeds.to(
                 inputs_embeds.device, inputs_embeds.dtype
@@ -732,14 +686,7 @@ def _make_fetp_forward(
                 if two_stage and n_visual_tokens > 1:
                     layer0 = self.language_model.layers[0]
                     hidden_normed = layer0.input_layernorm(inputs_embeds)
-                    stage1_visual_positions = _align_index_device(
-                        visual_positions,
-                        hidden_normed,
-                    )
-                    visual_hidden = hidden_normed.index_select(
-                        1,
-                        stage1_visual_positions,
-                    )
+                    visual_hidden = hidden_normed.index_select(1, visual_positions)
                     stage1_values = layer0.self_attn.v_proj(visual_hidden)[0]
                     stage1_keep = _diversity_prune(
                         stage1_values,
@@ -752,12 +699,7 @@ def _make_fetp_forward(
                     keep_global_indices = torch.cat(
                         [
                             non_visual_positions,
-                            visual_positions[
-                                _align_index_device(
-                                    stage1_keep,
-                                    visual_positions,
-                                )
-                            ],
+                            visual_positions[stage1_keep],
                         ],
                         dim=0,
                     ).sort().values
@@ -773,23 +715,13 @@ def _make_fetp_forward(
                         dim=1,
                         index=gather_index,
                     )
-                    keep_indices_for_input_ids = _align_index_device(
-                        keep_global_indices,
-                        input_ids,
-                    )
-                    input_ids = input_ids[:, keep_indices_for_input_ids]
-                    keep_indices_for_position_ids = _align_index_device(
-                        keep_global_indices,
-                        position_ids,
-                    )
-                    position_ids = position_ids[:, :, keep_indices_for_position_ids]
+                    input_ids = input_ids[:, keep_global_indices]
+                    position_ids = position_ids[:, :, keep_global_indices]
                     attention_mask = _slice_attention_mask(
                         attention_mask,
                         keep_global_indices,
                     )
-                    cache_position = cache_position[
-                        _align_index_device(keep_global_indices, cache_position)
-                    ]
+                    cache_position = cache_position[keep_global_indices]
                     (
                         visual_pos_masks,
                         deepstack_visual_embeds,
@@ -913,12 +845,7 @@ def _make_fetp_forward(
                 keep_global_indices = torch.cat(
                     [
                         non_visual_positions,
-                        visual_positions[
-                            _align_index_device(
-                                keep_visual_local,
-                                visual_positions,
-                            )
-                        ],
+                        visual_positions[keep_visual_local],
                     ],
                     dim=0,
                 ).sort().values
@@ -934,23 +861,13 @@ def _make_fetp_forward(
                     dim=1,
                     index=gather_index,
                 )
-                keep_indices_for_input_ids = _align_index_device(
-                    keep_global_indices,
-                    input_ids,
-                )
-                input_ids = input_ids[:, keep_indices_for_input_ids]
-                keep_indices_for_position_ids = _align_index_device(
-                    keep_global_indices,
-                    position_ids,
-                )
-                position_ids = position_ids[:, :, keep_indices_for_position_ids]
+                input_ids = input_ids[:, keep_global_indices]
+                position_ids = position_ids[:, :, keep_global_indices]
                 attention_mask = _slice_attention_mask(
                     attention_mask,
                     keep_global_indices,
                 )
-                cache_position = cache_position[
-                    _align_index_device(keep_global_indices, cache_position)
-                ]
+                cache_position = cache_position[keep_global_indices]
                 (
                     visual_pos_masks,
                     deepstack_visual_embeds,
@@ -1173,26 +1090,27 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         _fes_distribution_stats.clear()
-        self.load_cache()
-        cached_responses, pending_requests = self.partition_loaded_cache_requests(
-            requests
+        original_requests = list(requests)
+        cached_responses, pending_requests = self.split_requests_by_cache(
+            original_requests
         )
         if not pending_requests:
-            return self.merge_cached_and_generated_responses(
-                requests,
+            return self.merge_cached_and_new_responses(
+                original_requests,
                 cached_responses,
-                {},
+                [],
+                [],
             )
 
-        generated_responses = {}
+        res = []
 
-        def _collate(x):
-            return x.args[0], x.args[0]
+        def _collate(request):
+            return request.args[0], request.args[0]
 
         re_ords = utils.Collator(
             pending_requests,
             _collate,
-            group_fn=lambda x: x.args[2],
+            group_fn=lambda request: request.args[2],
             grouping=True,
         )
         chunks = re_ords.get_batched(n=self.batch_size, batch_fn=None)
@@ -1221,7 +1139,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 doc_id,
                 task,
                 split,
-            ) = zip(*[req.args for req in chunk_requests])
+            ) = zip(*[request.args for request in chunk_requests])
             chat_messages = [
                 doc_to_messages[idx](self.task_dict[task][split][ids])
                 for idx, (ids, task, split) in enumerate(
@@ -1234,15 +1152,18 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             ]
             gen_kwargs = all_gen_kwargs[0]
 
-            message_video_kwargs = _build_qwen_message_video_kwargs(
-                max_pixels=self.max_pixels,
-                min_pixels=self.min_pixels,
-                max_num_frames=self.max_num_frames,
-                fps=self.fps,
-            )
+            video_kwargs = {
+                "max_pixels": self.max_pixels,
+                "min_pixels": self.min_pixels,
+            }
+            if self.fps is not None:
+                video_kwargs["fps"] = self.fps
+                video_kwargs["max_frames"] = self.max_num_frames
+            else:
+                video_kwargs["nframes"] = self.max_num_frames
 
             batched_messages = [
-                chat_message.to_hf_messages(video_kwargs=message_video_kwargs)
+                chat_message.to_hf_messages(video_kwargs=video_kwargs)
                 for chat_message in chat_messages
             ]
             texts = self.processor.apply_chat_template(
@@ -1257,9 +1178,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 image_patch_size=16,
                 return_video_metadata=True,
             )
-            processor_video_kwargs = _build_qwen_processor_video_kwargs(
-                video_kwargs_qwen
-            )
+            video_kwargs = {**video_kwargs, **video_kwargs_qwen}
 
             video_metadatas = None
             if video_inputs is not None:
@@ -1273,7 +1192,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                     images=image_inputs,
                     videos=video_inputs,
                     video_metadata=video_metadatas,
-                    **processor_video_kwargs,
+                    **video_kwargs,
                     do_resize=False,
                     padding=True,
                     padding_side="left",
@@ -1285,7 +1204,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                     images=image_inputs,
                     videos=video_inputs,
                     video_metadata=video_metadatas,
-                    **processor_video_kwargs,
+                    **video_kwargs,
                     do_resize=False,
                     return_tensors="pt",
                 )
@@ -1358,10 +1277,10 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             e2e_latency += end_time - start_time
             total_tokens += sum(len(ids) for ids in generated_ids_trimmed)
 
-            for req, ans, context in zip(chunk_requests, answers, texts):
+            for request, ans, context in zip(chunk_requests, answers, texts):
                 clean_ans = parse_reasoning_model_answer(ans)
-                generated_responses[(req.task_name, req.doc_id)] = clean_ans
-                self.add_request_response_to_cache(req, clean_ans)
+                res.append(clean_ans)
+                self.add_request_response_to_cache(request, clean_ans)
                 self.cache_hook.add_partial(
                     "generate_until",
                     (context, gen_kwargs),
@@ -1373,6 +1292,14 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 eval_logger.debug(f"Model Clean Response: {clean_ans}")
 
             pbar.update(1)
+
+        res = re_ords.get_original(res)
+        res = self.merge_cached_and_new_responses(
+            original_requests,
+            cached_responses,
+            pending_requests,
+            res,
+        )
 
         avg_speed = total_tokens / e2e_latency if e2e_latency > 0 else 0
         additional_metrics: Dict[str, Union[int, float, str, bool]] = {
@@ -1446,8 +1373,4 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             )
 
         pbar.close()
-        return self.merge_cached_and_generated_responses(
-            requests,
-            cached_responses,
-            generated_responses,
-        )
+        return res

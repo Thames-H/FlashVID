@@ -111,6 +111,12 @@ class lmms(abc.ABC):
         else:
             self.cache_dict = collections.defaultdict(dict)
 
+    def _get_cached_response_value(self, task_name: str, doc_id: Any) -> Optional[Any]:
+        cached_value = self.cache_dict.get(task_name, {}).get(doc_id)
+        if isinstance(cached_value, dict) and "response" in cached_value:
+            return cached_value["response"]
+        return cached_value
+
     def load_jsonl_cache(self) -> Dict[str, Dict[str, Any]]:
         """
         Load all .jsonl files in the model's cache directory.
@@ -189,7 +195,7 @@ class lmms(abc.ABC):
         doc_id = self._extract_doc_id(request)
 
         record = {"doc_id": doc_id, "response": response}
-        self.cache_dict[task_name][doc_id] = record
+        self.cache_dict[task_name][doc_id] = response
         line = json.dumps(record, ensure_ascii=False)
 
         # Append in text mode with UTF-8 encoding
@@ -203,6 +209,7 @@ class lmms(abc.ABC):
         Add a request and response to the cache
         """
         if LMMS_EVAL_USE_CACHE == "True":
+            self.prepare_cache_dir()
             self._append_request_response_to_cache(request, response, request.task_name)
 
     def get_response_from_cache(self, requests: List[Instance]) -> Tuple[List[str], List[Instance]]:
@@ -214,61 +221,104 @@ class lmms(abc.ABC):
         not_cached_requests = []
         responses = []
         for request in requests:
-            if request.doc_id not in self.cache_dict[request.task_name]:
+            cached_response = self._get_cached_response_value(request.task_name, request.doc_id)
+            if cached_response is None:
                 not_cached_requests.append(request)
             else:
-                responses.append(self.cache_dict[request.task_name][request.doc_id])
+                responses.append(cached_response)
         eval_logger.info(f"Loaded {len(responses)} responses from cache")
         eval_logger.info(f"Not cached {len(not_cached_requests)} requests")
         return responses, not_cached_requests
 
-    def partition_loaded_cache_requests(self, requests: List[Instance]) -> Tuple[Dict[Tuple[str, Any], str], List[Instance]]:
+    def split_requests_by_cache(
+        self, requests: List[Instance]
+    ) -> Tuple[Dict[Tuple[str, Any], Any], List[Instance]]:
         """
-        Partition requests into cached vs. pending using the already loaded in-memory cache.
+        Load the JSONL request cache and split requests into cached and pending lists.
 
         Returns:
-            cached_responses: mapping of (task_name, doc_id) -> response
-            pending_requests: requests that still need model inference
+            cached_responses: map of (task_name, doc_id) -> response
+            pending_requests: requests that still need inference
         """
-        cached_responses: Dict[Tuple[str, Any], str] = {}
+        self.load_cache()
+        if LMMS_EVAL_USE_CACHE != "True":
+            return {}, list(requests)
+
+        cached_responses: Dict[Tuple[str, Any], Any] = {}
         pending_requests: List[Instance] = []
-
         for request in requests:
-            task_cache = self.cache_dict.get(request.task_name, {})
-            if request.doc_id in task_cache:
-                cached_responses[(request.task_name, request.doc_id)] = task_cache[request.doc_id]
-            else:
+            key = (request.task_name, request.doc_id)
+            cached_response = self._get_cached_response_value(*key)
+            if cached_response is None:
                 pending_requests.append(request)
+            else:
+                cached_responses[key] = cached_response
 
+        eval_logger.info(f"Loaded {len(cached_responses)} responses from cache")
+        eval_logger.info(f"Not cached {len(pending_requests)} requests")
         return cached_responses, pending_requests
+
+    def merge_cached_and_new_responses(
+        self,
+        original_requests: List[Instance],
+        cached_responses: Dict[Tuple[str, Any], Any],
+        pending_requests: List[Instance],
+        pending_responses: List[Any],
+    ) -> List[Any]:
+        """
+        Merge cached and newly generated responses back into the original request order.
+        """
+        pending_map = {
+            (request.task_name, request.doc_id): response
+            for request, response in zip(pending_requests, pending_responses)
+        }
+
+        merged_responses: List[Any] = []
+        for request in original_requests:
+            key = (request.task_name, request.doc_id)
+            if key in cached_responses:
+                merged_responses.append(cached_responses[key])
+                continue
+            if key in pending_map:
+                merged_responses.append(pending_map[key])
+                continue
+            raise KeyError(
+                f"Missing response for request task={request.task_name} doc_id={request.doc_id}"
+            )
+        return merged_responses
+
+    def partition_loaded_cache_requests(
+        self, requests: List[Instance]
+    ) -> Tuple[Dict[Tuple[str, Any], Any], List[Instance]]:
+        """
+        Backward-compatible alias for callers that already loaded the cache.
+        """
+        if LMMS_EVAL_USE_CACHE != "True":
+            return {}, list(requests)
+        return self.split_requests_by_cache(list(requests))
 
     def merge_cached_and_generated_responses(
         self,
         requests: List[Instance],
-        cached_responses: Dict[Tuple[str, Any], str],
-        generated_responses: Dict[Tuple[str, Any], str],
-    ) -> List[str]:
+        cached_responses: Dict[Tuple[str, Any], Any],
+        generated_responses: Dict[Tuple[str, Any], Any],
+    ) -> List[Any]:
         """
-        Rebuild a full response list in the original request order from cached and newly generated outputs.
+        Backward-compatible merge helper for precomputed generated-response maps.
         """
-        merged: List[str] = []
+        pending_requests = []
+        pending_responses = []
         for request in requests:
             key = (request.task_name, request.doc_id)
             if key in generated_responses:
-                merged.append(generated_responses[key])
-                continue
-            if key in cached_responses:
-                merged.append(cached_responses[key])
-                continue
-
-            task_cache = self.cache_dict.get(request.task_name, {})
-            if request.doc_id in task_cache:
-                merged.append(task_cache[request.doc_id])
-                continue
-
-            raise KeyError(f"Missing cached/generated response for task={request.task_name}, doc_id={request.doc_id}")
-
-        return merged
+                pending_requests.append(request)
+                pending_responses.append(generated_responses[key])
+        return self.merge_cached_and_new_responses(
+            list(requests),
+            cached_responses,
+            pending_requests,
+            pending_responses,
+        )
 
     @abc.abstractmethod
     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:

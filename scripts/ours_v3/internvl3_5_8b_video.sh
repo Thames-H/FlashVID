@@ -7,6 +7,8 @@ cd "${PROJECT_ROOT}"
 
 # Editable configuration. Change values here instead of exporting env vars.
 CUDA_VISIBLE_DEVICES="0,1,2,3"
+LMMS_EVAL_USE_CACHE="True"
+LMMS_EVAL_HOME="$PROJECT_ROOT/.cache/lmms-eval"
 NUM_PROCESSES=4
 MAIN_PROCESS_PORT=18893
 BATCH_SIZE=1
@@ -40,6 +42,8 @@ if [[ -d "$AUTODL_MODEL_PATH" ]]; then
 fi
 
 export CUDA_VISIBLE_DEVICES
+export LMMS_EVAL_USE_CACHE
+export LMMS_EVAL_HOME
 
 if [[ "$PRETRAINED" == "$LEGACY_AUTODL_MODEL_PATH" ]]; then
     echo "Error: '$PRETRAINED' is the original InternVL chat-format checkpoint."

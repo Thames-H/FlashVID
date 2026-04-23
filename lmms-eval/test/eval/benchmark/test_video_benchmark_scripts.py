@@ -18,6 +18,25 @@ class TestVideoBenchmarkScripts(TestCase):
             self.assertNotIn("TASKS_CSV", text, f"{path} should not read task lists from env vars")
             self.assertNotIn("RETENTION_RATIOS_CSV", text, f"{path} should not read retention ratios from env vars")
 
+    def test_ours_v3_video_scripts_enable_resume_cache(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        video_script_names = [
+            "internvl3_5_8b_video.sh",
+            "internvl3_5_8b_video_original.sh",
+            "llava_onevision_7b_video.sh",
+            "llava_onevision_7b_video_original.sh",
+            "qwen3_vl_8b_video.sh",
+            "qwen3_vl_8b_video_original.sh",
+        ]
+
+        for name in video_script_names:
+            path = repo_root / "scripts" / "ours_v3" / name
+            text = path.read_text(encoding="utf-8")
+            self.assertIn('LMMS_EVAL_USE_CACHE="True"', text, f"{path} should enable request cache")
+            self.assertIn('LMMS_EVAL_HOME="$PROJECT_ROOT/.cache/lmms-eval"', text, f"{path} should use project-local cache dir")
+            self.assertIn("export LMMS_EVAL_USE_CACHE", text, f"{path} should export cache toggle")
+            self.assertIn("export LMMS_EVAL_HOME", text, f"{path} should export cache directory")
+
     def test_qwen_and_llava_scripts_target_requested_video_tasks(self):
         repo_root = Path(__file__).resolve().parents[4]
         paths = [

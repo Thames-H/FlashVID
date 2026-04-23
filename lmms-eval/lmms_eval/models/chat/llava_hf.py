@@ -81,23 +81,43 @@ class LlavaHf(LlavaHfSimple):
         return prepared_visuals, prepared_videos
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
+        original_requests = list(requests)
+        cached_responses, pending_requests = self.split_requests_by_cache(
+            original_requests
+        )
+        if not pending_requests:
+            return self.merge_cached_and_new_responses(
+                original_requests,
+                cached_responses,
+                [],
+                [],
+            )
+
         res = []
 
         # A dummy collate here to sort by doc id
-        def _collate(x):
-            return x[2], x[2]
+        def _collate(request):
+            return request.args[2], request.args[2]
 
         # we group requests by their generation_kwargs,
         # so that we don't try to execute e.g. greedy sampling and temp=0.8 sampling
         # in the same batch.
-        re_ords = utils.Collator([reg.args for reg in requests], _collate, group_fn=lambda x: x[2], grouping=True)
+        re_ords = utils.Collator(
+            pending_requests,
+            _collate,
+            group_fn=lambda request: request.args[2],
+            grouping=True,
+        )
         chunks = re_ords.get_batched(n=self.batch_size, batch_fn=None)
-        num_iters = len(requests) // self.batch_size if len(requests) % self.batch_size == 0 else len(requests) // self.batch_size + 1
+        num_iters = len(pending_requests) // self.batch_size if len(pending_requests) % self.batch_size == 0 else len(pending_requests) // self.batch_size + 1
         pbar = tqdm(total=num_iters, disable=(self.rank != 0), desc="Model Responding")
         e2e_latency = 0
         total_tokens = 0
         for chunk in chunks:
-            ctx, doc_to_messages, all_gen_kwargs, doc_id, task, split = zip(*chunk)
+            chunk_requests = list(chunk)
+            ctx, doc_to_messages, all_gen_kwargs, doc_id, task, split = zip(
+                *[request.args for request in chunk_requests]
+            )
             task = task[0]
             split = split[0]
             chat_messages = [doc_to_messages[0](self.task_dict[task][split][ids]) for ids in doc_id]
@@ -195,10 +215,17 @@ class LlavaHf(LlavaHfSimple):
                 eval_logger.debug(f"Generated text for doc ID {doc_id[0]}:\n\n{text_outputs}\n")
 
             res.append(text_outputs)
+            self.add_request_response_to_cache(chunk_requests[0], text_outputs)
             self.cache_hook.add_partial("generate_until", (text, gen_kwargs), text_outputs)
             pbar.update(1)
         # reorder this group of results back to original unsorted form
         res = re_ords.get_original(res)
+        res = self.merge_cached_and_new_responses(
+            original_requests,
+            cached_responses,
+            pending_requests,
+            res,
+        )
 
         metric_dict = {
             "total_tokens": total_tokens,

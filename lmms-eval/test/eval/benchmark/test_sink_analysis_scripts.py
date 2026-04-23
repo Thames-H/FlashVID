@@ -67,6 +67,19 @@ class TestSinkAnalysisScripts(TestCase):
         self.assertIn("No results json produced under", llava_text)
         self.assertIn("No results json produced under", qwen_text)
 
+    def test_llava_scripts_expose_model_dtype_override(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        collect_script = repo_root / "scripts" / "sink_analysis" / "collect_llava.sh"
+        run_script = repo_root / "code" / "run_llava_sink_analysis.sh"
+
+        collect_text = collect_script.read_text(encoding="utf-8")
+        run_text = run_script.read_text(encoding="utf-8")
+
+        self.assertIn('MODEL_DTYPE="${MODEL_DTYPE:-float16}"', collect_text)
+        self.assertIn("dtype=${MODEL_DTYPE}", collect_text)
+        self.assertIn('export MODEL_DTYPE="${MODEL_DTYPE:-float16}"', run_text)
+        self.assertIn('echo "model dtype: ${MODEL_DTYPE}"', run_text)
+
     def test_code_wrapper_scripts_exist_for_pull_and_llava_only_run(self):
         repo_root = Path(__file__).resolve().parents[4]
         pull_script = repo_root / "code" / "pull_attn_sink.sh"

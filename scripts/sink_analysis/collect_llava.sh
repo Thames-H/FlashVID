@@ -69,14 +69,14 @@ PARTIAL_ROOT="${PROJECT_ROOT}/sink_analysis/artifacts_partial"
 RUN_ROOT="${PROJECT_ROOT}/sink_analysis/lmms_eval_outputs/llava-onevision/${METHOD}/${KEEP_RATIO_SLUG}"
 LOG_SAMPLES_SUFFIX="sink_analysis_llava_${METHOD}_${KEEP_RATIO_SLUG}"
 
-if [[ "${RESUME}" == "true" ]] && find "${RUN_ROOT}" -name '*_results.json' -print -quit | grep -q .; then
+if [[ "${RESUME}" == "true" && -d "${RUN_ROOT}" ]] && find "${RUN_ROOT}" -name '*_results.json' -print -quit | grep -q .; then
     echo "Skipping llava-onevision ${METHOD} ${KEEP_RATIO}: existing results found under ${RUN_ROOT}"
     exit 0
 fi
 
 case "${METHOD}" in
     full)
-        MODEL_NAME="llava_hf_chat"
+        MODEL_NAME="llava_hf"
         MODEL_ARGS="pretrained=${PRETRAINED},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=full,sink_analysis_keep_ratio=full"
         ;;
     fetp)
@@ -126,3 +126,8 @@ fi
 echo "collect llava sink-analysis partials"
 echo "Running: ${METHOD} keep_ratio=${KEEP_RATIO} tasks=${TASKS_CSV} limit=${LIMIT}"
 "${CMD[@]}"
+
+if ! find "${RUN_ROOT}" -name '*_results.json' -print -quit | grep -q .; then
+    echo "No results json produced under ${RUN_ROOT}" >&2
+    exit 1
+fi

@@ -1,8 +1,23 @@
 from pathlib import Path
+import re
 from unittest import TestCase
 
 
 class TestVideoBenchmarkScripts(TestCase):
+    def test_ours_v3_scripts_use_in_file_configuration_only(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        scripts_dir = repo_root / "scripts" / "ours_v3"
+        script_paths = sorted(scripts_dir.glob("*.sh"))
+
+        self.assertGreater(len(script_paths), 0, "Expected to validate ours_v3 scripts")
+
+        for path in script_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("# Editable configuration. Change values here instead of exporting env vars.", text)
+            self.assertNotRegex(text, r"\$\{[^}]+:-", f"{path} should not use shell default overrides")
+            self.assertNotIn("TASKS_CSV", text, f"{path} should not read task lists from env vars")
+            self.assertNotIn("RETENTION_RATIOS_CSV", text, f"{path} should not read retention ratios from env vars")
+
     def test_qwen_and_llava_scripts_target_requested_video_tasks(self):
         repo_root = Path(__file__).resolve().parents[4]
         paths = [
@@ -46,16 +61,17 @@ class TestVideoBenchmarkScripts(TestCase):
 
         text = script_path.read_text(encoding="utf-8")
         self.assertIn("--model internvl3_5_original", text)
-        self.assertIn('AUTODL_MODEL_PATH="${HOME}/autodl-tmp/InternVL3_5-8B-HF"', text)
+        self.assertIn('AUTODL_MODEL_PATH="$HOME/autodl-tmp/InternVL3_5-8B-HF"', text)
         self.assertIn('DEFAULT_PRETRAINED="OpenGVLab/InternVL3_5-8B-HF"', text)
-        self.assertIn('NUM_FRAMES="${NUM_FRAMES:-8}"', text)
-        self.assertIn('MAX_PATCHES="${MAX_PATCHES:-12}"', text)
-        self.assertIn('ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"', text)
-        self.assertIn('LOW_CPU_MEM_USAGE="${LOW_CPU_MEM_USAGE:-true}"', text)
+        self.assertRegex(text, re.compile(r"^NUM_FRAMES=8$", re.MULTILINE))
+        self.assertRegex(text, re.compile(r"^MAX_PATCHES=12$", re.MULTILINE))
+        self.assertRegex(text, re.compile(r'^ATTN_IMPLEMENTATION="flash_attention_2"$', re.MULTILINE))
+        self.assertRegex(text, re.compile(r'^LOW_CPU_MEM_USAGE="true"$', re.MULTILINE))
         self.assertIn('num_frames=$NUM_FRAMES', text)
         self.assertIn('max_patches=$MAX_PATCHES', text)
         self.assertIn('attn_implementation=$ATTN_IMPLEMENTATION', text)
         self.assertIn('low_cpu_mem_usage=$LOW_CPU_MEM_USAGE', text)
+        self.assertRegex(text, re.compile(r'^TASKS=\("videomme" "longvideobench_val_v"\)$', re.MULTILINE))
         self.assertIn('"videomme"', text)
         self.assertIn('"longvideobench_val_v"', text)
         self.assertNotIn("<<<", text)

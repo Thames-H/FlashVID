@@ -41,6 +41,17 @@ class TestSinkAnalysisScripts(TestCase):
         self.assertIn("merge.sh", text)
         self.assertIn("analyze.sh", text)
 
+    def test_collect_scripts_handle_full_keep_ratio_without_float_conversion_error(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        llava_script = repo_root / "scripts" / "sink_analysis" / "collect_llava.sh"
+        qwen_script = repo_root / "scripts" / "sink_analysis" / "collect_qwen3.sh"
+
+        llava_text = llava_script.read_text(encoding="utf-8")
+        qwen_text = qwen_script.read_text(encoding="utf-8")
+
+        self.assertIn("label.lower() == 'full'", llava_text)
+        self.assertIn("label.lower() == 'full'", qwen_text)
+
     def test_code_wrapper_scripts_exist_for_pull_and_llava_only_run(self):
         repo_root = Path(__file__).resolve().parents[4]
         pull_script = repo_root / "code" / "pull_attn_sink.sh"

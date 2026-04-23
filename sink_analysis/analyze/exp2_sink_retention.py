@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from sink_analysis.analyze.ratio_utils import sort_keep_ratios
 from sink_analysis.collect.sink_metrics import identify_sink_tokens
 
 
@@ -32,7 +33,12 @@ def compute_sink_retention(artifacts: list[dict], keep_ratio: str) -> dict[str, 
 
 
 def plot_sink_retention(artifacts_by_model: dict[str, list[dict]]):
-    ratios = ["25%", "50%", "75%"]
+    ratios = sort_keep_ratios(
+        keep_ratio
+        for artifacts in artifacts_by_model.values()
+        for artifact in artifacts
+        for keep_ratio in artifact.get("selections", {})
+    )
     methods = ["attention", "mmtok", "fetp"]
     colors = {"attention": "#e74c3c", "mmtok": "#f39c12", "fetp": "#2ecc71"}
     fig, axes = plt.subplots(

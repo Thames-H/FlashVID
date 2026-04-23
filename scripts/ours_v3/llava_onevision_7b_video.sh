@@ -5,58 +5,39 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
-export LMMS_EVAL_USE_CACHE="${LMMS_EVAL_USE_CACHE:-True}"
-export LMMS_EVAL_HOME="${LMMS_EVAL_HOME:-$PROJECT_ROOT/.cache/lmms-eval}"
-NUM_PROCESSES="${NUM_PROCESSES:-4}"
-MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-18895}"
-BATCH_SIZE="${BATCH_SIZE:-1}"
-LOG_SAMPLES_SUFFIX="${LOG_SAMPLES_SUFFIX:-llava_onevision_ours_v3_7b_video}"
-OUTPUT_PATH="${OUTPUT_PATH:-./logs/ours_v3_llava_onevision_7b_video}"
+# Editable configuration. Change values here instead of exporting env vars.
+CUDA_VISIBLE_DEVICES="0,1,2,3"
+NUM_PROCESSES=4
+MAIN_PROCESS_PORT=18895
+BATCH_SIZE=1
+LOG_SAMPLES_SUFFIX="llava_onevision_ours_v3_7b_video"
+OUTPUT_PATH="./logs/ours_v3_llava_onevision_7b_video"
+TASKS=("videomme" "longvideobench_val_v")
 
-DEVICE_MAP_DEFAULT=""
-if [[ "$NUM_PROCESSES" == "1" ]]; then
-    DEVICE_MAP_DEFAULT="auto"
-fi
-DEVICE_MAP="${DEVICE_MAP:-$DEVICE_MAP_DEFAULT}"
-if [[ "$NUM_PROCESSES" != "1" && "$DEVICE_MAP" == "auto" ]]; then
-    echo "Error: device_map=auto requires NUM_PROCESSES=1."
-    exit 1
-fi
-
-if [[ -n "${TASKS_CSV:-}" ]]; then
-    IFS=',' read -r -a TASKS <<< "${TASKS_CSV}"
-else
-    TASKS=("videomme" "longvideobench_val_v")
-fi
-
-AUTODL_MODEL_PATH="${HOME}/autodl-tmp/llava-onevision-qwen2-7b-ov-hf"
+AUTODL_MODEL_PATH="$HOME/autodl-tmp/llava-onevision-qwen2-7b-ov-hf"
 DEFAULT_PRETRAINED="llava-hf/llava-onevision-qwen2-7b-ov-hf"
+PRETRAINED="$DEFAULT_PRETRAINED"
+
+RETENTION_RATIOS=(0.05 0.10 0.20)
+SCORING_METHOD="full"
+SHALLOW_LAYERS=4
+TARGET_LAYER=15
+USE_ALPHA="true"
+USE_DEVIATION="true"
+TWO_STAGE="true"
+TEXT_CHUNK_SIZE=32
+
+MAX_FRAMES_NUM=16
+ATTN_IMPLEMENTATION="flash_attention_2"
+DTYPE="float16"
+
 if [[ -d "$AUTODL_MODEL_PATH" ]]; then
-    DEFAULT_PRETRAINED="$AUTODL_MODEL_PATH"
+    PRETRAINED="$AUTODL_MODEL_PATH"
 fi
-PRETRAINED="${PRETRAINED:-$DEFAULT_PRETRAINED}"
 
-if [[ -n "${RETENTION_RATIOS_CSV:-}" ]]; then
-    IFS=',' read -r -a RETENTION_RATIOS <<< "${RETENTION_RATIOS_CSV}"
-else
-    RETENTION_RATIOS=(0.05 0.10 0.20)
-fi
-SCORING_METHOD="${SCORING_METHOD:-full}"
-SHALLOW_LAYERS="${SHALLOW_LAYERS:-4}"
-TARGET_LAYER="${TARGET_LAYER:-15}"
-USE_ALPHA="${USE_ALPHA:-true}"
-USE_DEVIATION="${USE_DEVIATION:-true}"
-TWO_STAGE="${TWO_STAGE:-true}"
-TEXT_CHUNK_SIZE="${TEXT_CHUNK_SIZE:-32}"
+export CUDA_VISIBLE_DEVICES
 
-MAX_FRAMES_NUM="${MAX_FRAMES_NUM:-16}"
-ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
-DTYPE="${DTYPE:-float16}"
 BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_frames_num=$MAX_FRAMES_NUM,attn_implementation=$ATTN_IMPLEMENTATION,dtype=$DTYPE,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE"
-if [[ -n "$DEVICE_MAP" ]]; then
-    BASE_MODEL_ARGS="$BASE_MODEL_ARGS,device_map=$DEVICE_MAP"
-fi
 
 for retention_ratio in "${RETENTION_RATIOS[@]}"; do
     echo "Running LLaVA-OneVision-7B FETP-v3 video benchmarks with retention_ratio=${retention_ratio}"

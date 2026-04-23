@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from sink_analysis.analyze.ratio_utils import sort_keep_ratios
 from sink_analysis.collect.sink_metrics import identify_sink_tokens
 
 
@@ -67,7 +68,11 @@ def plot_ablation(results_by_model: dict[str, dict[str, dict[str, float]]]):
         "C: FETP": "#2ecc71",
         "D: FETP+Sink": "#95a5a6",
     }
-    ratios = ["25%", "50%", "75%"]
+    ratios = sort_keep_ratios(
+        ratio
+        for ratio_payload in results_by_model.values()
+        for ratio in ratio_payload
+    )
     fig, axes = plt.subplots(1, len(results_by_model), figsize=(7 * len(results_by_model), 6), sharey=True)
     if len(results_by_model) == 1:
         axes = [axes]

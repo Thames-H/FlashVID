@@ -45,6 +45,7 @@ def _build_summary_rows(artifacts_by_model: dict[str, list[dict]], keep_ratios: 
         for model_name, artifacts in artifacts_by_model.items():
             sink_ret_attn = []
             sink_ret_fetp = []
+            sink_ret_mmtok = []
             iou_fa = []
             iou_fm = []
             sink_counts = []
@@ -67,6 +68,8 @@ def _build_summary_rows(artifacts_by_model: dict[str, list[dict]], keep_ratios: 
                     sink_ret_attn.append(len(attention & sink_set) / len(sink_set))
                 if sink_set and fetp is not None:
                     sink_ret_fetp.append(len(fetp & sink_set) / len(sink_set))
+                if sink_set and mmtok is not None:
+                    sink_ret_mmtok.append(len(mmtok & sink_set) / len(sink_set))
                 if fetp is not None and attention is not None:
                     iou_fa.append(len(fetp & attention) / max(1, len(fetp | attention)))
                 if fetp is not None and mmtok is not None:
@@ -80,6 +83,7 @@ def _build_summary_rows(artifacts_by_model: dict[str, list[dict]], keep_ratios: 
                     "Avg Sink Count": f"{np.mean(sink_counts) if sink_counts else 0.0:.1f}",
                     "Sink Retention (Attn)": _format_metric(sink_ret_attn, percentage=True),
                     "Sink Retention (FETP)": _format_metric(sink_ret_fetp, percentage=True),
+                    "Sink Retention (MMTok)": _format_metric(sink_ret_mmtok, percentage=True),
                     "IoU (FETP vs Attn)": _format_metric(iou_fa, precision=3),
                     "IoU (FETP vs MMTok)": _format_metric(iou_fm, precision=3),
                 }

@@ -71,9 +71,11 @@ class TestSinkAnalysisScripts(TestCase):
         repo_root = Path(__file__).resolve().parents[4]
         pull_script = repo_root / "code" / "pull_attn_sink.sh"
         run_script = repo_root / "code" / "run_llava_sink_analysis.sh"
+        focused_run_script = repo_root / "code" / "run_llava_sink_analysis_10pct.sh"
 
         self.assertTrue(pull_script.exists(), f"{pull_script} should exist")
         self.assertTrue(run_script.exists(), f"{run_script} should exist")
+        self.assertTrue(focused_run_script.exists(), f"{focused_run_script} should exist")
 
         pull_text = pull_script.read_text(encoding="utf-8")
         self.assertIn("git fetch", pull_text)
@@ -93,3 +95,9 @@ class TestSinkAnalysisScripts(TestCase):
         self.assertIn('bash "${SINK_SCRIPT_DIR}/collect_llava.sh"', run_text)
         self.assertIn('bash "${SINK_SCRIPT_DIR}/merge.sh"', run_text)
         self.assertIn('bash "${SINK_SCRIPT_DIR}/analyze.sh"', run_text)
+
+        focused_text = focused_run_script.read_text(encoding="utf-8")
+        self.assertIn('export LIMIT="${LIMIT:-64}"', focused_text)
+        self.assertIn('export RATIOS_CSV="${RATIOS_CSV:-10%}"', focused_text)
+        self.assertIn('export TARGET_LAYER="${TARGET_LAYER:-15}"', focused_text)
+        self.assertIn('bash "${SCRIPT_DIR}/run_llava_sink_analysis.sh"', focused_text)

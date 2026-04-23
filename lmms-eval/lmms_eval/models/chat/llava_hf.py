@@ -27,6 +27,13 @@ VICUNA_CHAT_TEMPLATE = "{% for message in messages %}{% if loop.index0 == 0 %}A 
 class LlavaHf(LlavaHfSimple):
     is_simple = False
 
+    def _prepare_chat_media_inputs(self, visuals, videos):
+        prepared_visuals = visuals if len(visuals) != 0 else None
+        prepared_videos = None
+        if len(videos) != 0:
+            prepared_videos = [self.load_video(videos, self.max_frames_num)]
+        return prepared_visuals, prepared_videos
+
     def generate_until(self, requests: List[Instance]) -> List[str]:
         res = []
 
@@ -65,8 +72,14 @@ class LlavaHf(LlavaHfSimple):
             if self.accelerator.is_main_process and doc_id[0] % 100 == 0:
                 eval_logger.debug(f"Prompt for doc ID {doc_id[0]}:\n\n{text}\n")
 
-            if len(videos) == 0:
-                videos = None
+            try:
+                visuals, videos = self._prepare_chat_media_inputs(visuals, videos)
+            except Exception as e:
+                eval_logger.error(f"Error {e} when loading video: {videos}")
+                res.append("")
+                pbar.update(1)
+                continue
+
             inputs = self._prepare_processor_inputs(
                 self._image_processor(
                     images=visuals,
@@ -80,7 +93,7 @@ class LlavaHf(LlavaHfSimple):
             # this is safe to assume because the `grouper` object ensures it.
             gen_kwargs = all_gen_kwargs[0]
 
-            gen_kwargs["image_sizes"] = [visuals[idx].size for idx in range(len(visuals))]
+            gen_kwargs["image_sizes"] = [] if visuals is None else [visuals[idx].size for idx in range(len(visuals))]
             if "max_new_tokens" not in gen_kwargs:
                 gen_kwargs["max_new_tokens"] = 1024
             if "temperature" not in gen_kwargs:

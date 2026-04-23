@@ -29,3 +29,25 @@ class TestVideoBenchmarkScripts(TestCase):
         self.assertIn("modality=video", baseline_text)
         self.assertIn('"videomme"', baseline_text)
         self.assertIn('"longvideobench_val_v"', baseline_text)
+
+    def test_internvl_original_video_script_matches_official_reference_budget(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        script_path = (
+            repo_root
+            / "scripts"
+            / "ours_v3"
+            / "internvl3_5_8b_video_original.sh"
+        )
+
+        self.assertTrue(
+            script_path.exists(),
+            "InternVL3.5 original video script should exist",
+        )
+
+        text = script_path.read_text(encoding="utf-8")
+        self.assertIn("--model internvl3_5_original", text)
+        self.assertIn('NUM_FRAME="${NUM_FRAME:-8}"', text)
+        self.assertIn('MAX_NUM="${MAX_NUM:-1}"', text)
+        self.assertIn('USE_FLASH_ATTN="${USE_FLASH_ATTN:-true}"', text)
+        self.assertIn('"videomme"', text)
+        self.assertIn('"longvideobench_val_v"', text)

@@ -38,7 +38,7 @@ USE_DEVIATION="${USE_DEVIATION:-true}"
 TWO_STAGE="${TWO_STAGE:-true}"
 TEXT_CHUNK_SIZE="${TEXT_CHUNK_SIZE:-32}"
 
-MAX_FRAMES_NUM="${MAX_FRAMES_NUM:-32}"
+MAX_FRAMES_NUM="${MAX_FRAMES_NUM:-16}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 DTYPE="${DTYPE:-float16}"
 BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_frames_num=$MAX_FRAMES_NUM,attn_implementation=$ATTN_IMPLEMENTATION,dtype=$DTYPE,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE"

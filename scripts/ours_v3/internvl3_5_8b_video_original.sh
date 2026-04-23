@@ -30,17 +30,27 @@ else
     TASKS=("videomme" "longvideobench_val_v")
 fi
 
-AUTODL_MODEL_PATH="${HOME}/autodl-tmp/InternVL3_5-8B"
-DEFAULT_PRETRAINED="OpenGVLab/InternVL3_5-8B"
+AUTODL_MODEL_PATH="${HOME}/autodl-tmp/InternVL3_5-8B-HF"
+LEGACY_AUTODL_MODEL_PATH="${HOME}/autodl-tmp/InternVL3_5-8B"
+DEFAULT_PRETRAINED="OpenGVLab/InternVL3_5-8B-HF"
 if [[ -d "$AUTODL_MODEL_PATH" ]]; then
     DEFAULT_PRETRAINED="$AUTODL_MODEL_PATH"
 fi
 PRETRAINED="${PRETRAINED:-$DEFAULT_PRETRAINED}"
 
-NUM_FRAME="${NUM_FRAME:-8}"
-MAX_NUM="${MAX_NUM:-1}"
-USE_FLASH_ATTN="${USE_FLASH_ATTN:-true}"
-MODEL_ARGS="pretrained=$PRETRAINED,modality=video,num_frame=$NUM_FRAME,max_num=$MAX_NUM,use_flash_attn=$USE_FLASH_ATTN"
+if [[ "$PRETRAINED" == "$LEGACY_AUTODL_MODEL_PATH" ]]; then
+    echo "Error: '$PRETRAINED' is the original InternVL chat-format checkpoint."
+    echo "internvl3_5_original expects the HF-format checkpoint:"
+    echo "  - OpenGVLab/InternVL3_5-8B-HF"
+    echo "  - or a local directory such as \${HOME}/autodl-tmp/InternVL3_5-8B-HF"
+    exit 1
+fi
+
+NUM_FRAMES="${NUM_FRAMES:-8}"
+MAX_PATCHES="${MAX_PATCHES:-12}"
+ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
+LOW_CPU_MEM_USAGE="${LOW_CPU_MEM_USAGE:-true}"
+MODEL_ARGS="pretrained=$PRETRAINED,max_patches=$MAX_PATCHES,num_frames=$NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,low_cpu_mem_usage=$LOW_CPU_MEM_USAGE"
 if [[ -n "$DEVICE_MAP" ]]; then
     MODEL_ARGS="$MODEL_ARGS,device_map=$DEVICE_MAP"
 fi

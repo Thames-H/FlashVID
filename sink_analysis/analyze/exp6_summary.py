@@ -22,10 +22,10 @@ def generate_summary_table(artifacts_by_model: dict[str, list[dict]], keep_ratio
                 artifact["query_outputs"],
             )
             sink_set = set(torch.where(sink_mask)[0].tolist())
-            selection = artifact["selections"][keep_ratio]
-            fetp = set(selection["fetp"]["indices"].tolist())
-            attention = set(selection["attention"]["indices"].tolist())
-            mmtok = set(selection["mmtok"]["indices"].tolist())
+            selection = artifact.get("selections", {}).get(keep_ratio, {})
+            fetp = set(selection.get("fetp", {}).get("indices", torch.tensor([], dtype=torch.long)).tolist())
+            attention = set(selection.get("attention", {}).get("indices", torch.tensor([], dtype=torch.long)).tolist())
+            mmtok = set(selection.get("mmtok", {}).get("indices", torch.tensor([], dtype=torch.long)).tolist())
             sink_counts.append(len(sink_set))
             if sink_set:
                 sink_ret_attn.append(len(attention & sink_set) / len(sink_set))
@@ -45,4 +45,3 @@ def generate_summary_table(artifacts_by_model: dict[str, list[dict]], keep_ratio
             }
         )
     return pd.DataFrame(rows)
-

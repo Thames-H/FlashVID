@@ -73,6 +73,13 @@ def _build_llava_processor_kwargs(model_config, max_frames_num):
 class LlavaHf(LlavaHfSimple):
     is_simple = False
 
+    def _prepare_chat_media_inputs(self, visuals, videos):
+        prepared_visuals = visuals if visuals else None
+        prepared_videos = None
+        if videos:
+            prepared_videos = [self.load_video(videos, self.max_frames_num)]
+        return prepared_visuals, prepared_videos
+
     def generate_until(self, requests: List[Instance]) -> List[str]:
         res = []
 
@@ -115,10 +122,22 @@ class LlavaHf(LlavaHfSimple):
                 visuals,
                 videos,
             )
+            try:
+                visuals, videos = self._prepare_chat_media_inputs(visuals, videos)
+            except Exception as e:
+                eval_logger.error(f"Error {e} when loading video: {videos}")
+                res.append("")
+                pbar.update(1)
+                continue
+
             images_kwargs, videos_kwargs = _build_llava_processor_kwargs(
                 self.model.config,
                 self.max_frames_num,
             )
+            if videos is not None and len(videos) > 0 and not isinstance(videos[0], str):
+                videos_kwargs.pop("num_frames", None)
+                videos_kwargs.pop("do_sample_frames", None)
+
             inputs = self._prepare_processor_inputs(
                 self._image_processor(
                     images=visuals,

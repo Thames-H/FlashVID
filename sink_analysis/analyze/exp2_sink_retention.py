@@ -22,12 +22,11 @@ def compute_sink_retention(artifacts: list[dict], keep_ratio: str) -> dict[str, 
         for method in results:
             selection = ratio_selection.get(method)
             if selection is None:
-                results[method].append(0.0)
                 continue
             selected = set(selection["indices"].tolist())
             results[method].append(len(selected & sink_indices) / len(sink_indices))
     return {
-        method: float(np.mean(values)) if values else 0.0
+        method: float(np.mean(values)) if values else float("nan")
         for method, values in results.items()
     }
 

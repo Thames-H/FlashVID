@@ -5,7 +5,9 @@ import numpy as np
 import torch
 
 from sink_analysis.analyze.exp5_ablation import build_ablation_selections
+from sink_analysis.analyze.exp5_ablation import plot_ablation
 from sink_analysis.analyze.exp2_sink_retention import compute_sink_retention
+from sink_analysis.analyze.exp2_sink_retention import plot_sink_retention
 from sink_analysis.analyze.exp4_spatial_visuals import render_full_comparison
 from sink_analysis.analyze.exp6_summary import (
     generate_summary_table,
@@ -68,11 +70,37 @@ class TestSinkAnalysisAnalysisRobustness(TestCase):
     def test_generate_summary_tables_by_ratio_adds_keep_ratio_rows(self):
         artifact = _build_artifact_without_mmtok()
         artifact["selections"]["25%"] = artifact["selections"]["50%"]
+        artifact["selections"]["10%"] = artifact["selections"]["50%"]
 
         frame = generate_summary_tables_by_ratio({"llava-onevision": [artifact]})
 
-        self.assertEqual(frame["Keep Ratio"].tolist(), ["25%", "50%"])
+        self.assertEqual(frame["Keep Ratio"].tolist(), ["10%", "25%", "50%"])
         self.assertTrue((frame["Model"] == "llava-onevision").all())
+
+    def test_plot_sink_retention_uses_dynamic_keep_ratios(self):
+        artifact = _build_artifact_without_mmtok()
+        artifact["selections"]["5%"] = artifact["selections"]["50%"]
+        artifact["selections"]["10%"] = artifact["selections"]["50%"]
+        artifact["selections"]["20%"] = artifact["selections"]["50%"]
+
+        figure = plot_sink_retention({"llava-onevision": [artifact]})
+
+        labels = [tick.get_text() for tick in figure.axes[0].get_xticklabels()]
+        self.assertEqual(labels, ["5%", "10%", "20%", "50%"])
+
+    def test_plot_ablation_uses_dynamic_keep_ratios(self):
+        figure = plot_ablation(
+            {
+                "llava-onevision": {
+                    "5%": {"A: Attention": 0.1, "B: Attention-Sink": 0.2, "C: FETP": 0.3, "D: FETP+Sink": 0.4},
+                    "10%": {"A: Attention": 0.2, "B: Attention-Sink": 0.3, "C: FETP": 0.4, "D: FETP+Sink": 0.5},
+                    "20%": {"A: Attention": 0.3, "B: Attention-Sink": 0.4, "C: FETP": 0.5, "D: FETP+Sink": 0.6},
+                }
+            }
+        )
+
+        labels = [tick.get_text() for tick in figure.axes[0].get_xticklabels()]
+        self.assertEqual(labels, ["5%", "10%", "20%"])
 
     def test_render_full_comparison_handles_missing_mmtok_selection(self):
         artifact = _build_artifact_without_mmtok()

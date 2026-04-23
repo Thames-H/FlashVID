@@ -6,22 +6,16 @@ import numpy as np
 import pandas as pd
 import torch
 
+from sink_analysis.analyze.ratio_utils import sort_keep_ratios
 from sink_analysis.collect.sink_metrics import identify_sink_tokens
 
 
 def _infer_keep_ratios(artifacts_by_model: dict[str, list[dict]]) -> list[str]:
-    keep_ratios = {
+    return sort_keep_ratios(
         keep_ratio
         for artifacts in artifacts_by_model.values()
         for artifact in artifacts
         for keep_ratio in artifact.get("selections", {})
-    }
-    return sorted(
-        keep_ratios,
-        key=lambda value: (
-            1_000 if value == "full" else int(str(value).rstrip("%")),
-            str(value),
-        ),
     )
 
 

@@ -68,6 +68,7 @@ AVAILABLE_SIMPLE_MODELS = {
     "qwen2_vl": "Qwen2_VL",
     "qwen3_omni": "Qwen3_Omni",
     "qwen3_vl": "Qwen3_VL",
+    "qwen3_vl_original": "lmms_eval.models.chat.qwen3_vl_original.Qwen3_VL_Original",
     "reka": "Reka",
     "ross": "Ross",
     "slime": "Slime",

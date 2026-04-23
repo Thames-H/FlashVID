@@ -40,3 +40,24 @@ class TestSinkAnalysisScripts(TestCase):
         self.assertIn("rerun-ablation", text)
         self.assertIn("merge.sh", text)
         self.assertIn("analyze.sh", text)
+
+    def test_code_wrapper_scripts_exist_for_pull_and_llava_only_run(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        pull_script = repo_root / "code" / "pull_attn_sink.sh"
+        run_script = repo_root / "code" / "run_llava_sink_analysis.sh"
+
+        self.assertTrue(pull_script.exists(), f"{pull_script} should exist")
+        self.assertTrue(run_script.exists(), f"{run_script} should exist")
+
+        pull_text = pull_script.read_text(encoding="utf-8")
+        self.assertIn("git fetch", pull_text)
+        self.assertIn("attn-sink", pull_text)
+        self.assertIn("git pull", pull_text)
+
+        run_text = run_script.read_text(encoding="utf-8")
+        self.assertIn("collect_llava.sh", run_text)
+        self.assertNotIn("collect_qwen3.sh", run_text)
+        self.assertIn("build-ablation", run_text)
+        self.assertIn("merge.sh", run_text)
+        self.assertIn("analyze.sh", run_text)
+        self.assertIn("/root/autodl-tmp/llava-onevision-qwen2-7b-ov-hf", run_text)

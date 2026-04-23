@@ -29,6 +29,36 @@ DEFAULT_GEN_KWARGS = dict(
 )
 
 
+def _build_internvl_loader_kwargs(device_map: str, use_flash_attn: bool) -> Tuple[dict, dict]:
+    common_kwargs = {
+        "torch_dtype": torch.bfloat16,
+        "low_cpu_mem_usage": True,
+        "trust_remote_code": True,
+        "device_map": device_map,
+    }
+    legacy_kwargs = {
+        **common_kwargs,
+        "use_flash_attn": use_flash_attn,
+    }
+    modern_kwargs = dict(common_kwargs)
+    if use_flash_attn:
+        modern_kwargs["attn_implementation"] = "flash_attention_2"
+    return legacy_kwargs, modern_kwargs
+
+
+def _load_internvl_model(pretrained: str, device_map: str, use_flash_attn: bool):
+    legacy_kwargs, modern_kwargs = _build_internvl_loader_kwargs(device_map, use_flash_attn)
+    try:
+        return AutoModel.from_pretrained(pretrained, **legacy_kwargs)
+    except TypeError as exc:
+        if "use_flash_attn" not in str(exc):
+            raise
+        eval_logger.warning(
+            "InternVL loader is falling back from legacy use_flash_attn to attn_implementation."
+        )
+        return AutoModel.from_pretrained(pretrained, **modern_kwargs)
+
+
 def build_transform(input_size: int) -> T.Compose:
     """Build image transformation pipeline for preprocessing.
 
@@ -274,13 +304,10 @@ class InternVL3(lmms):
             self._device = torch.device(f"cuda:{accelerator.local_process_index}")
             self.device_map = f"cuda:{accelerator.local_process_index}"
 
-        self._model = AutoModel.from_pretrained(
+        self._model = _load_internvl_model(
             self.path,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-            use_flash_attn=use_flash_attn,
-            trust_remote_code=True,
-            device_map=self.device_map,
+            self.device_map,
+            use_flash_attn,
         ).eval()
         self._config = self._model.config
         self._tokenizer = AutoTokenizer.from_pretrained(self.path, trust_remote_code=True, use_fast=False)

@@ -21,6 +21,7 @@ from transformers.models.qwen2.modeling_qwen2 import (
 )
 
 from lmms_eval.api.registry import register_model
+from sink_analysis.schema import keep_ratio_to_label
 
 from .llava_hf import LlavaHf as LlavaHfChat
 
@@ -341,19 +342,29 @@ def _compute_fes_scores_from_compact_inputs(
     use_alpha: bool = True,
     use_deviation: bool = True,
     text_chunk_size: Optional[int] = 32,
+    return_details: bool = False,
 ) -> torch.Tensor:
     n_vis = visual_value_states.shape[2]
     if n_vis == 0:
         return torch.empty(0, device=visual_value_states.device)
 
+    vis_values = visual_value_states[0].float()
+    vis_values = vis_values.permute(1, 0, 2).reshape(n_vis, -1)
+
     if text_to_vis_logits.shape[2] == 0:
-        return torch.ones(n_vis, device=visual_value_states.device)
+        scores = torch.ones(n_vis, device=visual_value_states.device)
+        if return_details:
+            empty_alpha = torch.empty(0, n_vis, device=visual_value_states.device)
+            empty_outputs = torch.empty(
+                0,
+                vis_values.shape[-1],
+                device=visual_value_states.device,
+            )
+            return scores, scores, scores, empty_alpha, vis_values, empty_outputs
+        return scores
 
     text_to_vis_alpha = F.softmax(text_to_vis_logits.float(), dim=-1)
     alpha_per_text = text_to_vis_alpha.mean(dim=1)[0]
-
-    vis_values = visual_value_states[0].float()
-    vis_values = vis_values.permute(1, 0, 2).reshape(n_vis, -1)
 
     total_text_tokens = alpha_per_text.shape[0]
     if text_chunk_size is None or text_chunk_size <= 0:
@@ -365,11 +376,14 @@ def _compute_fes_scores_from_compact_inputs(
         n_vis, device=vis_values.device, dtype=torch.float32
     )
     score_sum = torch.zeros(n_vis, device=vis_values.device, dtype=torch.float32)
+    query_outputs: list[torch.Tensor] = []
 
     for start in range(0, total_text_tokens, text_chunk_size):
         end = min(start + text_chunk_size, total_text_tokens)
         alpha_chunk = alpha_per_text[start:end]
         o_chunk = alpha_chunk @ vis_values
+        if return_details:
+            query_outputs.append(o_chunk)
         o_norm_sq = o_chunk.pow(2).sum(dim=-1, keepdim=True)
         deviation_sq_chunk = (
             vis_norm_sq.unsqueeze(0)
@@ -392,11 +406,24 @@ def _compute_fes_scores_from_compact_inputs(
         deviation_sum += deviation_sq_chunk.sqrt().sum(dim=0)
 
     scores = (score_sum / total_text_tokens).sqrt()
-    if use_alpha and use_deviation:
-        return scores
-
     alpha_mean = alpha_sum / total_text_tokens
     deviation_mean = deviation_sum / total_text_tokens
+    if return_details:
+        query_output_tensor = (
+            torch.cat(query_outputs, dim=0)
+            if query_outputs
+            else torch.empty(0, vis_values.shape[-1], device=vis_values.device)
+        )
+        return (
+            scores,
+            alpha_mean,
+            deviation_mean,
+            alpha_per_text,
+            vis_values,
+            query_output_tensor,
+        )
+    if use_alpha and use_deviation:
+        return scores
     if use_alpha:
         return alpha_mean
     if use_deviation:
@@ -669,6 +696,8 @@ def _make_fetp_forward(
                 and past_key_values.get_seq_length() == 0
             )
         )
+        if is_prefill:
+            self._sink_analysis_last_export = None
 
         if position_ids is None:
             position_ids = torch.arange(
@@ -820,15 +849,55 @@ def _make_fetp_forward(
                             text_to_vis_logits is not None
                             and visual_value_states is not None
                         ):
-                            scores = _compute_fes_scores_from_compact_inputs(
+                            (
+                                scores,
+                                alpha_mean,
+                                deviation_mean,
+                                alpha_matrix,
+                                value_matrix,
+                                query_outputs,
+                            ) = _compute_fes_scores_from_compact_inputs(
                                 text_to_vis_logits=text_to_vis_logits,
                                 visual_value_states=visual_value_states,
                                 use_alpha=use_alpha,
                                 use_deviation=use_deviation,
                                 text_chunk_size=text_chunk_size,
+                                return_details=True,
                             )
-                            _, top_indices = scores.topk(num_keep)
-                            keep_visual_local = top_indices.sort().values
+                            if use_alpha and use_deviation:
+                                selection_scores = scores
+                            elif use_alpha:
+                                selection_scores = alpha_mean
+                            elif use_deviation:
+                                selection_scores = deviation_mean
+                            else:
+                                selection_scores = torch.ones_like(scores)
+                            override_keep_indices = getattr(
+                                self,
+                                "_sink_analysis_override_keep_indices",
+                                None,
+                            )
+                            if override_keep_indices is not None:
+                                keep_visual_local = (
+                                    override_keep_indices.to(inputs_embeds.device)
+                                    .long()
+                                    .sort()
+                                    .values
+                                )
+                            else:
+                                _, top_indices = selection_scores.topk(num_keep)
+                                keep_visual_local = top_indices.sort().values
+                            self._sink_analysis_last_export = {
+                                "method": "fetp",
+                                "keep_ratio": keep_ratio_to_label(retention_ratio),
+                                "target_layer": int(extract_at),
+                                "num_visual_tokens": int(original_n_visual_tokens),
+                                "indices": keep_visual_local.detach().cpu(),
+                                "scores": selection_scores.detach().cpu(),
+                                "alpha": alpha_matrix.detach().cpu(),
+                                "values": value_matrix.detach().cpu(),
+                                "query_outputs": query_outputs.detach().cpu(),
+                            }
                         else:
                             eval_logger.warning(
                                 "FETP(LLaVA-OneVision): attention extraction "
@@ -844,6 +913,17 @@ def _make_fetp_forward(
                                 .mul(step)
                                 .long()
                             )
+                            self._sink_analysis_last_export = {
+                                "method": "fetp",
+                                "keep_ratio": keep_ratio_to_label(retention_ratio),
+                                "target_layer": int(extract_at),
+                                "num_visual_tokens": int(original_n_visual_tokens),
+                                "indices": keep_visual_local.detach().cpu(),
+                                "scores": torch.ones(
+                                    n_visual_tokens,
+                                    dtype=torch.float32,
+                                ),
+                            }
 
                         non_visual_positions = torch.where(
                             input_ids[0] != visual_token_id

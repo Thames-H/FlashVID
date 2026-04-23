@@ -319,6 +319,7 @@ class LlavaOnevision_MMTok(nn.Module):
             )
 
         try:
+            self._sink_analysis_last_export = None
             image_keep_local = None
             video_keep_local = None
             original_image_feature_count = None
@@ -465,6 +466,28 @@ class LlavaOnevision_MMTok(nn.Module):
             inputs_embeds = gather_sequence_hidden_states(inputs_embeds, keep_indices)
             attention_mask = slice_attention_mask(attention_mask, keep_indices)
             position_ids = slice_position_ids(position_ids, keep_indices)
+            num_visual_tokens = 0
+            selected_keep = None
+            if original_image_feature_count is not None:
+                num_visual_tokens = int(original_image_feature_count)
+                selected_keep = image_keep_local
+            elif original_video_feature_count is not None:
+                num_visual_tokens = int(original_video_feature_count)
+                selected_keep = video_keep_local
+            if selected_keep is not None:
+                scores = torch.zeros(
+                    num_visual_tokens,
+                    device=inputs_embeds.device,
+                    dtype=torch.float32,
+                )
+                if selected_keep.numel() > 0:
+                    scores[selected_keep] = 1.0
+                self._sink_analysis_last_export = {
+                    "method": "mmtok",
+                    "num_visual_tokens": num_visual_tokens,
+                    "indices": selected_keep.detach().cpu(),
+                    "scores": scores.detach().cpu(),
+                }
         except Exception as error:
             eval_logger.warning(
                 f"[MMTok-LLaVA-OneVision] Falling back to full visual tokens due to selection failure: {error}"

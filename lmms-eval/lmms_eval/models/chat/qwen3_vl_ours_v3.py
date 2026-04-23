@@ -9,6 +9,7 @@ import json
 import math
 import os
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
@@ -35,6 +36,15 @@ from lmms_eval.models.model_utils.reasoning_model_utils import (
 )
 from lmms_eval.models.simple.qwen3_vl import Qwen3_VL as Qwen3_VLSimple
 from lmms_eval.protocol import ChatMessages
+from sink_analysis.collect.patch_mapping import build_qwen3vl_mapping
+from sink_analysis.collect.sample_records import extract_ground_truth_from_doc
+from sink_analysis.collect.writer import (
+    build_partial_record_payload,
+    load_override_map,
+    lookup_override_indices,
+    write_partial_record,
+)
+from sink_analysis.schema import SinkAnalysisExportConfig, build_sample_id, keep_ratio_to_label
 
 from .qwen3_vl_ours_v2 import (
     _get_suffix_text_positions,
@@ -170,6 +180,7 @@ def _compute_fes_scores_from_compact_inputs(
     use_alpha: bool = True,
     use_deviation: bool = True,
     text_chunk_size: Optional[int] = 32,
+    return_details: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute FETP-v3 scores from compact text-to-visual logits.
 
@@ -209,11 +220,14 @@ def _compute_fes_scores_from_compact_inputs(
         n_vis, device=vis_values.device, dtype=torch.float32
     )
     score_sum = torch.zeros(n_vis, device=vis_values.device, dtype=torch.float32)
+    query_outputs: list[torch.Tensor] = []
 
     for start in range(0, total_text_tokens, text_chunk_size):
         end = min(start + text_chunk_size, total_text_tokens)
         alpha_chunk = alpha_per_text[start:end]
         o_chunk = alpha_chunk @ vis_values
+        if return_details:
+            query_outputs.append(o_chunk)
         o_norm_sq = o_chunk.pow(2).sum(dim=-1, keepdim=True)
         dev_sq_chunk = (
             vis_norm_sq.unsqueeze(0)
@@ -238,6 +252,20 @@ def _compute_fes_scores_from_compact_inputs(
     scores = (score_sum / total_text_tokens).sqrt()
     alpha_mean = alpha_sum / total_text_tokens
     deviation_mean = deviation_sum / total_text_tokens
+    if return_details:
+        query_output_tensor = (
+            torch.cat(query_outputs, dim=0)
+            if query_outputs
+            else torch.empty(0, vis_values.shape[-1], device=vis_values.device)
+        )
+        return (
+            scores,
+            alpha_mean,
+            deviation_mean,
+            alpha_per_text,
+            vis_values,
+            query_output_tensor,
+        )
     return scores, alpha_mean, deviation_mean
 
 
@@ -530,6 +558,7 @@ def _make_fetp_forward(
         )
         if is_prefill_stage or not hasattr(self, "_fetp_last_pruning_stats"):
             self._fetp_last_pruning_stats = {}
+            self._sink_analysis_last_export = None
 
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
@@ -786,13 +815,21 @@ def _make_fetp_forward(
                     text_to_vis_logits is not None
                     and visual_value_states is not None
                 ):
-                    scores, alpha_mean, deviation_mean = (
+                    (
+                        scores,
+                        alpha_mean,
+                        deviation_mean,
+                        alpha_matrix,
+                        value_matrix,
+                        query_outputs,
+                    ) = (
                         _compute_fes_scores_from_compact_inputs(
                             text_to_vis_logits=text_to_vis_logits,
                             visual_value_states=visual_value_states,
                             use_alpha=use_alpha,
                             use_deviation=use_deviation,
                             text_chunk_size=text_chunk_size,
+                            return_details=True,
                         )
                     )
                     _fes_distribution_stats.append(
@@ -810,8 +847,34 @@ def _make_fetp_forward(
                             "score": _tensor_summary(scores),
                         }
                     )
-                    keep_visual_local = scores.topk(num_keep).indices.sort().values
+                    override_keep_indices = getattr(
+                        self,
+                        "_sink_analysis_override_keep_indices",
+                        None,
+                    )
+                    if override_keep_indices is not None:
+                        keep_visual_local = (
+                            override_keep_indices.to(inputs_embeds.device)
+                            .long()
+                            .sort()
+                            .values
+                        )
+                    else:
+                        keep_visual_local = (
+                            scores.topk(num_keep).indices.sort().values
+                        )
                     score_heads = int(text_to_vis_logits.shape[1])
+                    self._sink_analysis_last_export = {
+                        "method": "fetp",
+                        "keep_ratio": keep_ratio_to_label(retention_ratio),
+                        "target_layer": int(extract_at),
+                        "num_visual_tokens": int(original_n_visual_tokens),
+                        "indices": keep_visual_local.detach().cpu(),
+                        "scores": scores.detach().cpu(),
+                        "alpha": alpha_matrix.detach().cpu(),
+                        "values": value_matrix.detach().cpu(),
+                        "query_outputs": query_outputs.detach().cpu(),
+                    }
                 else:
                     eval_logger.warning(
                         "FETP(Qwen3-VL/V3): attention extraction failed, "
@@ -838,6 +901,17 @@ def _make_fetp_forward(
                         }
                     )
                     score_heads = self.language_model.config.num_attention_heads
+                    self._sink_analysis_last_export = {
+                        "method": "fetp",
+                        "keep_ratio": keep_ratio_to_label(retention_ratio),
+                        "target_layer": int(extract_at),
+                        "num_visual_tokens": int(original_n_visual_tokens),
+                        "indices": keep_visual_local.detach().cpu(),
+                        "scores": torch.ones(
+                            n_visual_tokens,
+                            dtype=torch.float32,
+                        ),
+                    }
 
                 non_visual_positions = torch.where(
                     input_ids[0] != visual_token_id
@@ -1016,6 +1090,10 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
         max_score_heads: Optional[int] = 8,
         profile_reference_scoring: bool = False,
         reference_scoring_method: str = "shallow",
+        sink_analysis_output_root: Optional[str] = None,
+        sink_analysis_method_name: Optional[str] = None,
+        sink_analysis_keep_ratio: Optional[str] = None,
+        sink_analysis_override_path: Optional[str] = None,
         **kwargs,
     ) -> None:
         assert kwargs == {}, f"Unexpected kwargs: {kwargs}"
@@ -1041,6 +1119,15 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
 
         self.retention_ratio = retention_ratio
         self.stats_output_path = stats_output_path
+        self._sink_analysis_config = None
+        if sink_analysis_output_root and sink_analysis_method_name and sink_analysis_keep_ratio:
+            self._sink_analysis_config = SinkAnalysisExportConfig(
+                output_root=Path(sink_analysis_output_root),
+                model_name="qwen3-vl",
+                method_name=sink_analysis_method_name,
+                keep_ratio_label=keep_ratio_to_label(sink_analysis_keep_ratio),
+            )
+        self._sink_analysis_override_map = load_override_map(sink_analysis_override_path)
 
         if scoring_method == "anchor":
             eval_logger.warning(
@@ -1211,6 +1298,29 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             }
             current_gen_kwargs = {**default_gen_kwargs, **gen_kwargs}
             pad_token_id = self.tokenizer.pad_token_id
+            export_source = getattr(self.model, "model", self.model)
+            export_config = getattr(self, "_sink_analysis_config", None)
+            if export_source is not None:
+                setattr(export_source, "_sink_analysis_last_export", None)
+                setattr(export_source, "_sink_analysis_override_keep_indices", None)
+            if export_config is not None and len(doc_id) == 1 and export_source is not None:
+                sample_id = build_sample_id(str(task[0]), doc_id[0])
+                override_indices = lookup_override_indices(
+                    getattr(self, "_sink_analysis_override_map", None),
+                    model_name=export_config.model_name,
+                    sample_id=sample_id,
+                    keep_ratio_label=export_config.keep_ratio_label,
+                )
+                if override_indices is not None:
+                    setattr(
+                        export_source,
+                        "_sink_analysis_override_keep_indices",
+                        torch.tensor(
+                            override_indices,
+                            device=self.device,
+                            dtype=torch.long,
+                        ),
+                    )
 
             if current_gen_kwargs["temperature"] > 0:
                 current_gen_kwargs["do_sample"] = True
@@ -1264,7 +1374,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             e2e_latency += end_time - start_time
             total_tokens += sum(len(ids) for ids in generated_ids_trimmed)
 
-            for ans, context in zip(answers, texts):
+            for index, (ans, context) in enumerate(zip(answers, texts)):
                 clean_ans = parse_reasoning_model_answer(ans)
                 res.append(clean_ans)
                 self.cache_hook.add_partial(
@@ -1276,6 +1386,40 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 eval_logger.debug(f"Question: {context}")
                 eval_logger.debug(f"Model Raw Response: {ans}")
                 eval_logger.debug(f"Model Clean Response: {clean_ans}")
+                if export_config is not None and len(doc_id) == 1 and index == 0:
+                    export_payload = getattr(export_source, "_sink_analysis_last_export", None)
+                    sample_doc = self.task_dict[task[index]][split[index]][doc_id[index]]
+                    image = image_inputs[index] if image_inputs is not None and index < len(image_inputs) else None
+                    image_size = None
+                    if image is not None:
+                        raw_size = getattr(image, "size", None)
+                        if raw_size is not None and not callable(raw_size):
+                            image_size = (int(raw_size[1]), int(raw_size[0]))
+                    image_grid = inputs.get("image_grid_thw")
+                    if image_grid is not None and torch.is_tensor(image_grid) and image_grid.ndim > 1:
+                        image_grid = image_grid[0]
+                    payload = build_partial_record_payload(
+                        export_config=export_config,
+                        task_name=str(task[index]),
+                        doc_id=doc_id[index],
+                        benchmark=str(task[index]),
+                        target=extract_ground_truth_from_doc(sample_doc),
+                        messages=chat_messages[index].model_dump()["messages"],
+                        answer=clean_ans,
+                        export_payload=export_payload,
+                        patch_mapping=build_qwen3vl_mapping(
+                            image_size=image_size,
+                            grid_thw=image_grid,
+                        )
+                        if export_payload is not None
+                        else None,
+                        image=image,
+                    )
+                    write_partial_record(export_config.output_root, payload)
+
+            if export_source is not None:
+                setattr(export_source, "_sink_analysis_override_keep_indices", None)
+                setattr(export_source, "_sink_analysis_last_export", None)
 
             pbar.update(1)
 

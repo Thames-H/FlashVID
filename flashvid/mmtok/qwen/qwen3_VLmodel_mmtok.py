@@ -250,6 +250,7 @@ class Qwen3_VL_MMTok(nn.Module):
         video_embeds = None
         image_selection_features = None
         video_selection_features = None
+        self._sink_analysis_last_export = None
 
         if pixel_values is not None:
             image_outputs = self.get_image_features(pixel_values, image_grid_thw)
@@ -492,6 +493,28 @@ class Qwen3_VL_MMTok(nn.Module):
                     keep_global_indices,
                     deepstack_visual_embeds,
                 )
+                num_visual_tokens = 0
+                selected_keep = None
+                if image_embeds is not None:
+                    num_visual_tokens = int(image_embeds.shape[0])
+                    selected_keep = image_keep_local
+                elif video_embeds is not None:
+                    num_visual_tokens = int(video_embeds.shape[0])
+                    selected_keep = video_keep_local
+                if selected_keep is not None:
+                    scores = torch.zeros(
+                        num_visual_tokens,
+                        device=inputs_embeds.device,
+                        dtype=torch.float32,
+                    )
+                    if selected_keep.numel() > 0:
+                        scores[selected_keep] = 1.0
+                    self._sink_analysis_last_export = {
+                        "method": "mmtok",
+                        "num_visual_tokens": num_visual_tokens,
+                        "indices": selected_keep.detach().cpu(),
+                        "scores": scores.detach().cpu(),
+                    }
 
         outputs = self.language_model(
             input_ids=None,

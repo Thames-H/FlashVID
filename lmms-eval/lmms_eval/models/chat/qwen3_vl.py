@@ -1,6 +1,8 @@
 import time
-from typing import List
+from pathlib import Path
+from typing import List, Optional
 
+import torch
 from loguru import logger as eval_logger
 from tqdm import tqdm
 
@@ -14,6 +16,15 @@ from lmms_eval.models.model_utils.reasoning_model_utils import (
 )
 from lmms_eval.models.simple.qwen3_vl import Qwen3_VL as Qwen3_VLSimple
 from lmms_eval.protocol import ChatMessages
+from sink_analysis.collect.patch_mapping import build_qwen3vl_mapping
+from sink_analysis.collect.sample_records import extract_ground_truth_from_doc
+from sink_analysis.collect.writer import (
+    build_partial_record_payload,
+    load_override_map,
+    lookup_override_indices,
+    write_partial_record,
+)
+from sink_analysis.schema import SinkAnalysisExportConfig, build_sample_id, keep_ratio_to_label
 
 process_vision_info, _has_qwen_vl = optional_import("qwen_vl_utils", "process_vision_info")
 if not _has_qwen_vl:
@@ -23,6 +34,26 @@ if not _has_qwen_vl:
 @register_model("qwen3_vl_chat")
 class Qwen3_VL(Qwen3_VLSimple):
     is_simple = False
+
+    def __init__(
+        self,
+        *args,
+        sink_analysis_output_root: Optional[str] = None,
+        sink_analysis_method_name: Optional[str] = None,
+        sink_analysis_keep_ratio: Optional[str] = None,
+        sink_analysis_override_path: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._sink_analysis_config = None
+        if sink_analysis_output_root and sink_analysis_method_name and sink_analysis_keep_ratio:
+            self._sink_analysis_config = SinkAnalysisExportConfig(
+                output_root=Path(sink_analysis_output_root),
+                model_name="qwen3-vl",
+                method_name=sink_analysis_method_name,
+                keep_ratio_label=keep_ratio_to_label(sink_analysis_keep_ratio),
+            )
+        self._sink_analysis_override_map = load_override_map(sink_analysis_override_path)
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         res = []
@@ -127,6 +158,30 @@ class Qwen3_VL(Qwen3_VLSimple):
             current_gen_kwargs = {**default_gen_kwargs, **gen_kwargs}
             pad_token_id = self.tokenizer.pad_token_id
 
+            export_source = getattr(self.model, "model", self.model)
+            export_config = getattr(self, "_sink_analysis_config", None)
+            if export_source is not None:
+                setattr(export_source, "_sink_analysis_last_export", None)
+                setattr(export_source, "_sink_analysis_override_keep_indices", None)
+            if export_config is not None and len(doc_id) == 1 and export_source is not None:
+                sample_id = build_sample_id(str(task[0]), doc_id[0])
+                override_indices = lookup_override_indices(
+                    getattr(self, "_sink_analysis_override_map", None),
+                    model_name=export_config.model_name,
+                    sample_id=sample_id,
+                    keep_ratio_label=export_config.keep_ratio_label,
+                )
+                if override_indices is not None:
+                    setattr(
+                        export_source,
+                        "_sink_analysis_override_keep_indices",
+                        torch.tensor(
+                            override_indices,
+                            device=self.device,
+                            dtype=torch.long,
+                        ),
+                    )
+
             if current_gen_kwargs["temperature"] > 0:
                 current_gen_kwargs["do_sample"] = True
             else:
@@ -161,7 +216,7 @@ class Qwen3_VL(Qwen3_VLSimple):
             e2e_latency += end_time - start_time
             total_tokens += sum(len(ids) for ids in generated_ids_trimmed)
 
-            for ans, context in zip(answers, texts):
+            for index, (ans, context) in enumerate(zip(answers, texts)):
                 clean_ans = parse_reasoning_model_answer(ans)
                 res.append(clean_ans)
                 self.cache_hook.add_partial("generate_until", (context, gen_kwargs), clean_ans)
@@ -169,6 +224,43 @@ class Qwen3_VL(Qwen3_VLSimple):
                 eval_logger.debug(f"Question: {context}")
                 eval_logger.debug(f"Model Raw Response: {ans}")
                 eval_logger.debug(f"Model Clean Response: {clean_ans}")
+                if export_config is not None and len(doc_id) == 1 and index == 0:
+                    export_payload = getattr(
+                        export_source,
+                        "_sink_analysis_last_export",
+                        None,
+                    )
+                    sample_doc = self.task_dict[task[index]][split[index]][doc_id[index]]
+                    image = visuals[index] if index < len(visuals) else None
+                    image_size = None
+                    if image is not None:
+                        raw_size = getattr(image, "size", None)
+                        if raw_size is not None and not callable(raw_size):
+                            image_size = (int(raw_size[1]), int(raw_size[0]))
+                    image_grid = inputs.get("image_grid_thw")
+                    if image_grid is not None and torch.is_tensor(image_grid) and image_grid.ndim > 1:
+                        image_grid = image_grid[0]
+                    payload = build_partial_record_payload(
+                        export_config=export_config,
+                        task_name=str(task[index]),
+                        doc_id=doc_id[index],
+                        benchmark=str(task[index]),
+                        target=extract_ground_truth_from_doc(sample_doc),
+                        messages=chat_messages[index].model_dump()["messages"],
+                        answer=clean_ans,
+                        export_payload=export_payload,
+                        patch_mapping=build_qwen3vl_mapping(
+                            image_size=image_size,
+                            grid_thw=image_grid,
+                        )
+                        if export_payload is not None
+                        else None,
+                        image=image,
+                    )
+                    write_partial_record(export_config.output_root, payload)
+            if export_source is not None:
+                setattr(export_source, "_sink_analysis_override_keep_indices", None)
+                setattr(export_source, "_sink_analysis_last_export", None)
             # reorder this group of results back to original unsorted form
             pbar.update(1)
         res = re_ords.get_original(res)

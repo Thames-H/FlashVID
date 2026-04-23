@@ -1,7 +1,9 @@
 import time
 import warnings
-from typing import List
+from pathlib import Path
+from typing import List, Optional
 
+import torch
 from tqdm import tqdm
 
 from lmms_eval import utils
@@ -9,6 +11,15 @@ from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.model_utils.gen_metrics import log_metrics
 from lmms_eval.protocol import ChatMessages
+from sink_analysis.collect.patch_mapping import build_onevision_mapping
+from sink_analysis.collect.sample_records import extract_ground_truth_from_doc
+from sink_analysis.collect.writer import (
+    build_partial_record_payload,
+    load_override_map,
+    lookup_override_indices,
+    write_partial_record,
+)
+from sink_analysis.schema import SinkAnalysisExportConfig, build_sample_id, keep_ratio_to_label
 
 warnings.filterwarnings("ignore")
 
@@ -26,6 +37,26 @@ VICUNA_CHAT_TEMPLATE = "{% for message in messages %}{% if loop.index0 == 0 %}A 
 @register_model("llava_hf_chat")
 class LlavaHf(LlavaHfSimple):
     is_simple = False
+
+    def __init__(
+        self,
+        *args,
+        sink_analysis_output_root: Optional[str] = None,
+        sink_analysis_method_name: Optional[str] = None,
+        sink_analysis_keep_ratio: Optional[str] = None,
+        sink_analysis_override_path: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._sink_analysis_config = None
+        if sink_analysis_output_root and sink_analysis_method_name and sink_analysis_keep_ratio:
+            self._sink_analysis_config = SinkAnalysisExportConfig(
+                output_root=Path(sink_analysis_output_root),
+                model_name="llava-onevision",
+                method_name=sink_analysis_method_name,
+                keep_ratio_label=keep_ratio_to_label(sink_analysis_keep_ratio),
+            )
+        self._sink_analysis_override_map = load_override_map(sink_analysis_override_path)
 
     def _prepare_chat_media_inputs(self, visuals, videos):
         prepared_visuals = visuals if len(visuals) != 0 else None
@@ -65,6 +96,7 @@ class LlavaHf(LlavaHfSimple):
             visuals = self.flatten(visuals)
             videos = self.flatten(videos)
             assert self.batch_size_per_gpu == 1, "Do not support batch_size_per_gpu > 1 for now"
+            preview_image = visuals[0] if visuals else None
 
             # Apply chat template
             messages = chat_messages[0].model_dump()["messages"]
@@ -103,6 +135,29 @@ class LlavaHf(LlavaHfSimple):
             if "num_beams" not in gen_kwargs:
                 gen_kwargs["num_beams"] = 1
             do_sample = True if gen_kwargs["temperature"] > 0 else False
+            export_source = getattr(self.model, "model", self.model)
+            export_config = getattr(self, "_sink_analysis_config", None)
+            if export_source is not None:
+                setattr(export_source, "_sink_analysis_last_export", None)
+                setattr(export_source, "_sink_analysis_override_keep_indices", None)
+            if export_config is not None and len(doc_id) == 1 and export_source is not None:
+                sample_id = build_sample_id(str(task), doc_id[0])
+                override_indices = lookup_override_indices(
+                    getattr(self, "_sink_analysis_override_map", None),
+                    model_name=export_config.model_name,
+                    sample_id=sample_id,
+                    keep_ratio_label=export_config.keep_ratio_label,
+                )
+                if override_indices is not None:
+                    setattr(
+                        export_source,
+                        "_sink_analysis_override_keep_indices",
+                        torch.tensor(
+                            override_indices,
+                            device=self.device,
+                            dtype=torch.long,
+                        ),
+                    )
             try:
                 start_time = time.time()
                 cont = self.model.generate(
@@ -136,6 +191,39 @@ class LlavaHf(LlavaHfSimple):
 
             res.append(text_outputs)
             self.cache_hook.add_partial("generate_until", (text, gen_kwargs), text_outputs)
+            if export_config is not None and len(doc_id) == 1:
+                export_payload = getattr(export_source, "_sink_analysis_last_export", None)
+                sample_doc = self.task_dict[task][split][doc_id[0]]
+                vision_config = getattr(self.model.config, "vision_config", None)
+                preview_image_size = None
+                if preview_image is not None:
+                    raw_size = getattr(preview_image, "size", None)
+                    if raw_size is not None and not callable(raw_size):
+                        preview_image_size = (int(raw_size[1]), int(raw_size[0]))
+                payload = build_partial_record_payload(
+                    export_config=export_config,
+                    task_name=str(task),
+                    doc_id=doc_id[0],
+                    benchmark=str(task),
+                    target=extract_ground_truth_from_doc(sample_doc),
+                    messages=messages,
+                    answer=text_outputs,
+                    export_payload=export_payload,
+                    patch_mapping=build_onevision_mapping(
+                        image_size=preview_image_size,
+                        image_grid_pinpoints=getattr(self.model.config, "image_grid_pinpoints", None),
+                        vision_image_size=getattr(vision_config, "image_size", 384),
+                        vision_patch_size=getattr(vision_config, "patch_size", 14),
+                        vision_aspect_ratio=getattr(self.model.config, "vision_aspect_ratio", "anyres_max_9"),
+                    )
+                    if export_payload is not None
+                    else None,
+                    image=preview_image,
+                )
+                write_partial_record(export_config.output_root, payload)
+            if export_source is not None:
+                setattr(export_source, "_sink_analysis_override_keep_indices", None)
+                setattr(export_source, "_sink_analysis_last_export", None)
             pbar.update(1)
         # reorder this group of results back to original unsorted form
         res = re_ords.get_original(res)

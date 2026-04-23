@@ -95,6 +95,7 @@ class MMTokCore:
         vision_features_clip: torch.Tensor,
         text_token_embedding: torch.Tensor,
         padding_patch_indices_list: list = None,
+        target_vision_tokens=None,
     ) -> torch.Tensor:
         if vision_features.dim() == 2:
             vision_features = vision_features.unsqueeze(0)
@@ -102,8 +103,18 @@ class MMTokCore:
             vision_features_clip = vision_features_clip.unsqueeze(0)
         batch_size, num_tokens, _hidden_dim = vision_features.shape
 
-        if num_tokens <= self.target_vision_tokens:
+        effective_target_vision_tokens = target_vision_tokens
+        if effective_target_vision_tokens is None:
+            effective_target_vision_tokens = self.target_vision_tokens
+
+        if effective_target_vision_tokens is None:
             return vision_features, [list(range(num_tokens))] * batch_size
+
+        effective_target_vision_tokens = int(effective_target_vision_tokens)
+        if num_tokens <= effective_target_vision_tokens:
+            return vision_features, [list(range(num_tokens))] * batch_size
+
+        self.token_selector.target_vision_tokens = effective_target_vision_tokens
 
         selected_tokens_list = []
         selected_indices_list = []
@@ -151,5 +162,6 @@ class MMTokCore:
             vision_features=image_embeds,
             vision_features_clip=image_features,
             text_token_embedding=text_token_embedding,
+            target_vision_tokens=target_vision_tokens,
         )
         return selected_indices[0], selected_features[0]

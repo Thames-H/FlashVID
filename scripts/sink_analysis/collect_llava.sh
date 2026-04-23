@@ -56,6 +56,7 @@ KEEP_RATIO_SLUG="${KEEP_RATIO//%/pct}"
 RETENTION_RATIO="$(python -c "label='${KEEP_RATIO}'.strip(); print(1.0 if label.lower() == 'full' else (float(label.rstrip('%'))/100.0 if label.endswith('%') else float(label)))" )"
 
 PRETRAINED="${PRETRAINED:-llava-hf/llava-onevision-qwen2-7b-ov-hf}"
+MODEL_DTYPE="${MODEL_DTYPE:-float16}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 MAX_NUM_FRAMES="${MAX_NUM_FRAMES:-8}"
 NUM_PROCESSES="${NUM_PROCESSES:-1}"
@@ -77,27 +78,27 @@ fi
 case "${METHOD}" in
     full)
         MODEL_NAME="llava_hf"
-        MODEL_ARGS="pretrained=${PRETRAINED},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=full,sink_analysis_keep_ratio=full"
+        MODEL_ARGS="pretrained=${PRETRAINED},dtype=${MODEL_DTYPE},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=full,sink_analysis_keep_ratio=full"
         ;;
     fetp)
         MODEL_NAME="llava_onevision_ours_v3"
-        MODEL_ARGS="pretrained=${PRETRAINED},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},retention_ratio=${RETENTION_RATIO},scoring_method=${SCORING_METHOD},shallow_layers=${SHALLOW_LAYERS},target_layer=${TARGET_LAYER},use_alpha=true,use_deviation=true,two_stage=false,text_chunk_size=${TEXT_CHUNK_SIZE},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=fetp,sink_analysis_keep_ratio=${KEEP_RATIO}"
+        MODEL_ARGS="pretrained=${PRETRAINED},dtype=${MODEL_DTYPE},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},retention_ratio=${RETENTION_RATIO},scoring_method=${SCORING_METHOD},shallow_layers=${SHALLOW_LAYERS},target_layer=${TARGET_LAYER},use_alpha=true,use_deviation=true,two_stage=false,text_chunk_size=${TEXT_CHUNK_SIZE},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=fetp,sink_analysis_keep_ratio=${KEEP_RATIO}"
         ;;
     attention)
         MODEL_NAME="llava_onevision_ours_v3"
-        MODEL_ARGS="pretrained=${PRETRAINED},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},retention_ratio=${RETENTION_RATIO},scoring_method=${SCORING_METHOD},shallow_layers=${SHALLOW_LAYERS},target_layer=${TARGET_LAYER},use_alpha=true,use_deviation=false,two_stage=false,text_chunk_size=${TEXT_CHUNK_SIZE},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=attention,sink_analysis_keep_ratio=${KEEP_RATIO}"
+        MODEL_ARGS="pretrained=${PRETRAINED},dtype=${MODEL_DTYPE},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},retention_ratio=${RETENTION_RATIO},scoring_method=${SCORING_METHOD},shallow_layers=${SHALLOW_LAYERS},target_layer=${TARGET_LAYER},use_alpha=true,use_deviation=false,two_stage=false,text_chunk_size=${TEXT_CHUNK_SIZE},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=attention,sink_analysis_keep_ratio=${KEEP_RATIO}"
         ;;
     mmtok)
         MODEL_NAME="llava_onevision_mmtok"
-        MODEL_ARGS="pretrained=${PRETRAINED},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},retain_ratio=${RETENTION_RATIO},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=mmtok,sink_analysis_keep_ratio=${KEEP_RATIO}"
+        MODEL_ARGS="pretrained=${PRETRAINED},dtype=${MODEL_DTYPE},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},retain_ratio=${RETENTION_RATIO},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=mmtok,sink_analysis_keep_ratio=${KEEP_RATIO}"
         ;;
     ablation_b)
         MODEL_NAME="llava_onevision_ours_v3"
-        MODEL_ARGS="pretrained=${PRETRAINED},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},retention_ratio=${RETENTION_RATIO},scoring_method=${SCORING_METHOD},shallow_layers=${SHALLOW_LAYERS},target_layer=${TARGET_LAYER},use_alpha=true,use_deviation=false,two_stage=false,text_chunk_size=${TEXT_CHUNK_SIZE},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=ablation_b,sink_analysis_keep_ratio=${KEEP_RATIO},sink_analysis_override_path=${OVERRIDE_FILE}"
+        MODEL_ARGS="pretrained=${PRETRAINED},dtype=${MODEL_DTYPE},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},retention_ratio=${RETENTION_RATIO},scoring_method=${SCORING_METHOD},shallow_layers=${SHALLOW_LAYERS},target_layer=${TARGET_LAYER},use_alpha=true,use_deviation=false,two_stage=false,text_chunk_size=${TEXT_CHUNK_SIZE},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=ablation_b,sink_analysis_keep_ratio=${KEEP_RATIO},sink_analysis_override_path=${OVERRIDE_FILE}"
         ;;
     ablation_d)
         MODEL_NAME="llava_onevision_ours_v3"
-        MODEL_ARGS="pretrained=${PRETRAINED},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},retention_ratio=${RETENTION_RATIO},scoring_method=${SCORING_METHOD},shallow_layers=${SHALLOW_LAYERS},target_layer=${TARGET_LAYER},use_alpha=true,use_deviation=true,two_stage=false,text_chunk_size=${TEXT_CHUNK_SIZE},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=ablation_d,sink_analysis_keep_ratio=${KEEP_RATIO},sink_analysis_override_path=${OVERRIDE_FILE}"
+        MODEL_ARGS="pretrained=${PRETRAINED},dtype=${MODEL_DTYPE},attn_implementation=${ATTN_IMPLEMENTATION},max_frames_num=${MAX_NUM_FRAMES},retention_ratio=${RETENTION_RATIO},scoring_method=${SCORING_METHOD},shallow_layers=${SHALLOW_LAYERS},target_layer=${TARGET_LAYER},use_alpha=true,use_deviation=true,two_stage=false,text_chunk_size=${TEXT_CHUNK_SIZE},sink_analysis_output_root=${PARTIAL_ROOT},sink_analysis_method_name=ablation_d,sink_analysis_keep_ratio=${KEEP_RATIO},sink_analysis_override_path=${OVERRIDE_FILE}"
         ;;
     *)
         echo "Unsupported method: ${METHOD}" >&2

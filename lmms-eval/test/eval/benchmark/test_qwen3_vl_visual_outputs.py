@@ -12,9 +12,20 @@ class _FakeOutputs:
 
 
 class _FakeMerger:
+    class _Norm:
+        normalized_shape = (3,)
+
+    class _Linear:
+        out_features = 3
+
+    norm = _Norm()
+    linear_fc2 = _Linear()
+
     def __call__(self, tensor):
         if tensor.ndim == 3:
             return tensor.mean(dim=1)
+        if tensor.ndim == 2:
+            return tensor.reshape(-1, 4, tensor.shape[-1]).mean(dim=1)
         return tensor
 
 
@@ -39,6 +50,20 @@ class TestQwen3VLVisualOutputs(unittest.TestCase):
         self.assertTrue(
             torch.equal(merged_deepstack[0], deepstack_feature.mean(dim=1))
         )
+
+    def test_unpack_merges_raw_2d_visual_tokens_before_returning(self):
+        raw_features = torch.arange(8 * 3, dtype=torch.float32).reshape(8, 3)
+        outputs = _FakeOutputs(last_hidden_state=raw_features)
+
+        merged_features, merged_deepstack = _unpack_visual_outputs(
+            outputs, merger=_FakeMerger()
+        )
+
+        self.assertEqual(merged_features.shape, (2, 3))
+        self.assertTrue(
+            torch.equal(merged_features, raw_features.reshape(2, 4, 3).mean(dim=1))
+        )
+        self.assertIsNone(merged_deepstack)
 
 
 if __name__ == "__main__":

@@ -123,6 +123,34 @@ def _get_suffix_text_positions(
     return non_visual_positions[non_visual_positions > visual_positions[-1]]
 
 
+def _get_merger_shapes(merger):
+    if merger is None:
+        return None, None
+
+    input_hidden = None
+    normalized_shape = getattr(getattr(merger, "norm", None), "normalized_shape", None)
+    if normalized_shape is not None:
+        if isinstance(normalized_shape, tuple):
+            input_hidden = normalized_shape[-1]
+        else:
+            input_hidden = normalized_shape
+
+    output_hidden = getattr(getattr(merger, "linear_fc2", None), "out_features", None)
+    return input_hidden, output_hidden
+
+
+def _maybe_merge_visual_tensor(hidden_states, merger=None):
+    if hidden_states is None or merger is None or not isinstance(hidden_states, torch.Tensor):
+        return hidden_states
+
+    input_hidden, output_hidden = _get_merger_shapes(merger)
+    if input_hidden is not None and hidden_states.shape[-1] == input_hidden:
+        return merger(hidden_states)
+    if output_hidden is not None and hidden_states.shape[-1] == output_hidden:
+        return hidden_states
+    return hidden_states
+
+
 def _flatten_visual_tensor(hidden_states, merger=None):
     if hidden_states is None:
         return None
@@ -135,9 +163,8 @@ def _flatten_visual_tensor(hidden_states, merger=None):
         if not parts:
             return None
         return torch.cat(parts, dim=0)
+    hidden_states = _maybe_merge_visual_tensor(hidden_states, merger=merger)
     if hidden_states.ndim == 3:
-        if merger is not None:
-            return merger(hidden_states)
         return hidden_states.reshape(-1, hidden_states.shape[-1])
     return hidden_states
 

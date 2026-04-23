@@ -18,6 +18,7 @@ from transformers.utils import TransformersKwargs
 
 from ..core import MMTokCore
 from ..core.adapter_utils import (
+    concat_token_features,
     compute_target_vision_tokens,
     extract_question_from_messages,
     gather_sequence_hidden_states,
@@ -132,6 +133,10 @@ def _cast_tensor_for_module(tensor: torch.Tensor, module) -> torch.Tensor:
     if target_dtype is None or tensor.dtype == target_dtype:
         return tensor
     return tensor.to(dtype=target_dtype)
+
+
+def _concat_token_features(features):
+    return concat_token_features(features)
 
 
 def _select_vision_features(
@@ -326,15 +331,17 @@ class LlavaOnevision_MMTok(nn.Module):
             original_video_feature_count = None
 
             if pixel_values is not None:
-                image_features = _extract_image_features_compat(
-                    self,
-                    pixel_values=pixel_values,
-                    image_sizes=image_sizes,
-                    vision_feature_layer=vision_feature_layer,
-                    vision_feature_select_strategy=vision_feature_select_strategy,
-                    vision_aspect_ratio=vision_aspect_ratio,
-                    batch_num_images=batch_num_images,
-                    **kwargs,
+                image_features = _concat_token_features(
+                    _extract_image_features_compat(
+                        self,
+                        pixel_values=pixel_values,
+                        image_sizes=image_sizes,
+                        vision_feature_layer=vision_feature_layer,
+                        vision_feature_select_strategy=vision_feature_select_strategy,
+                        vision_aspect_ratio=vision_aspect_ratio,
+                        batch_num_images=batch_num_images,
+                        **kwargs,
+                    )
                 ).to(inputs_embeds.device, inputs_embeds.dtype)
                 original_image_feature_count = image_features.shape[0]
                 image_hidden_states = image_features
@@ -356,18 +363,22 @@ class LlavaOnevision_MMTok(nn.Module):
                         device=inputs_embeds.device,
                         dtype=torch.long,
                     )
-                    image_hidden_states = selected_image_features.to(
+                    image_hidden_states = _concat_token_features(
+                        selected_image_features
+                    ).to(
                         inputs_embeds.device,
                         inputs_embeds.dtype,
                     )
 
             if pixel_values_videos is not None:
-                video_features = _extract_video_features_compat(
-                    self,
-                    pixel_values=pixel_values_videos,
-                    vision_feature_layer=vision_feature_layer,
-                    vision_feature_select_strategy=vision_feature_select_strategy,
-                    **kwargs,
+                video_features = _concat_token_features(
+                    _extract_video_features_compat(
+                        self,
+                        pixel_values=pixel_values_videos,
+                        vision_feature_layer=vision_feature_layer,
+                        vision_feature_select_strategy=vision_feature_select_strategy,
+                        **kwargs,
+                    )
                 )
                 image_newline = self.image_newline[None, None, :].repeat(
                     video_features.shape[0],
@@ -399,7 +410,9 @@ class LlavaOnevision_MMTok(nn.Module):
                         device=inputs_embeds.device,
                         dtype=torch.long,
                     )
-                    video_hidden_states = selected_video_features.to(
+                    video_hidden_states = _concat_token_features(
+                        selected_video_features
+                    ).to(
                         inputs_embeds.device,
                         inputs_embeds.dtype,
                     )
@@ -549,15 +562,17 @@ def _forward_without_mmtok(
 ):
     image_hidden_states = None
     if pixel_values is not None:
-        image_hidden_states = _extract_image_features_compat(
-            self,
-            pixel_values=pixel_values,
-            image_sizes=image_sizes,
-            vision_feature_layer=vision_feature_layer,
-            vision_feature_select_strategy=vision_feature_select_strategy,
-            vision_aspect_ratio=vision_aspect_ratio,
-            batch_num_images=batch_num_images,
-            **kwargs,
+        image_hidden_states = _concat_token_features(
+            _extract_image_features_compat(
+                self,
+                pixel_values=pixel_values,
+                image_sizes=image_sizes,
+                vision_feature_layer=vision_feature_layer,
+                vision_feature_select_strategy=vision_feature_select_strategy,
+                vision_aspect_ratio=vision_aspect_ratio,
+                batch_num_images=batch_num_images,
+                **kwargs,
+            )
         ).to(inputs_embeds.device, inputs_embeds.dtype)
         special_image_mask, _ = self.get_placeholder_mask(
             input_ids,
@@ -571,12 +586,14 @@ def _forward_without_mmtok(
 
     video_hidden_states = None
     if pixel_values_videos is not None:
-        video_hidden_states = _extract_video_features_compat(
-            self,
-            pixel_values=pixel_values_videos,
-            vision_feature_layer=vision_feature_layer,
-            vision_feature_select_strategy=vision_feature_select_strategy,
-            **kwargs,
+        video_hidden_states = _concat_token_features(
+            _extract_video_features_compat(
+                self,
+                pixel_values=pixel_values_videos,
+                vision_feature_layer=vision_feature_layer,
+                vision_feature_select_strategy=vision_feature_select_strategy,
+                **kwargs,
+            )
         )
         image_newline = self.image_newline[None, None, :].repeat(
             video_hidden_states.shape[0],

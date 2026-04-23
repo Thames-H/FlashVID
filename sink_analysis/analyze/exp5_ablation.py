@@ -29,18 +29,25 @@ def build_ablation_selections(artifact: dict, keep_ratio: str) -> dict[str, torc
     )
 
     config_c = selected["fetp"]["indices"]
-    config_d_list = list(config_c.tolist())
-    for sink_idx in sink_set:
-        if sink_idx not in config_d_list:
-            if len(config_d_list) >= k:
-                config_d_list.pop()
-            config_d_list.append(sink_idx)
+    config_d_selected = set(config_c.tolist())
+    removable = sorted(
+        (idx for idx in config_d_selected if idx not in sink_set),
+        key=lambda idx: float(fetp_scores[idx]),
+    )
+    missing_sinks = sorted(
+        (idx for idx in sink_set if idx not in config_d_selected),
+        key=lambda idx: float(attention_scores[idx]),
+        reverse=True,
+    )
+    for sink_idx, remove_idx in zip(missing_sinks, removable):
+        config_d_selected.remove(remove_idx)
+        config_d_selected.add(sink_idx)
 
     return {
         "A: Attention": config_a,
         "B: Attention-Sink": config_b,
         "C: FETP": config_c,
-        "D: FETP+Sink": torch.tensor(config_d_list[:k], dtype=torch.long),
+        "D: FETP+Sink": torch.tensor(sorted(config_d_selected), dtype=torch.long),
     }
 
 

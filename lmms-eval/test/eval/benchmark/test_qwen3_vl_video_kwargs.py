@@ -1,59 +1,29 @@
 import unittest
 
 from lmms_eval.models.chat.qwen3_vl_ours_v2 import (
-    _build_qwen_message_video_kwargs,
-    _build_qwen_processor_video_kwargs,
+    _build_message_video_kwargs,
+    _build_processor_video_kwargs,
 )
 
 
-class Qwen3VideoKwargsTest(unittest.TestCase):
-    def test_build_message_video_kwargs_uses_nframes_without_fps(self):
-        video_kwargs = _build_qwen_message_video_kwargs(
-            max_pixels=1605632,
-            min_pixels=200704,
+class TestQwen3VLVideoKwargs(unittest.TestCase):
+    def test_message_video_kwargs_use_nframes_for_presampled_path(self):
+        kwargs = _build_message_video_kwargs(
+            min_pixels=10,
+            max_pixels=20,
             max_num_frames=8,
             fps=None,
         )
+        self.assertEqual(kwargs["min_pixels"], 10)
+        self.assertEqual(kwargs["max_pixels"], 20)
+        self.assertEqual(kwargs["nframes"], 8)
+        self.assertNotIn("do_sample_frames", kwargs)
 
-        self.assertEqual(
-            video_kwargs,
-            {
-                "max_pixels": 1605632,
-                "min_pixels": 200704,
-                "nframes": 8,
-            },
+    def test_processor_video_kwargs_strip_sampling_keys(self):
+        kwargs = _build_processor_video_kwargs(
+            {"do_sample_frames": False, "fps": [2.0], "max_frames": 8}
         )
-
-    def test_build_message_video_kwargs_uses_fps_and_max_frames(self):
-        video_kwargs = _build_qwen_message_video_kwargs(
-            max_pixels=1605632,
-            min_pixels=200704,
-            max_num_frames=8,
-            fps=2.0,
-        )
-
-        self.assertEqual(
-            video_kwargs,
-            {
-                "max_pixels": 1605632,
-                "min_pixels": 200704,
-                "fps": 2.0,
-                "max_frames": 8,
-            },
-        )
-
-    def test_build_processor_video_kwargs_keeps_only_processor_safe_values(self):
-        processor_kwargs = _build_qwen_processor_video_kwargs(
-            {
-                "do_sample_frames": False,
-                "fps": [2.0],
-                "nframes": 8,
-                "max_frames": 8,
-                "max_pixels": 1605632,
-            }
-        )
-
-        self.assertEqual(processor_kwargs, {"do_sample_frames": False})
+        self.assertEqual(kwargs, {"do_sample_frames": False})
 
 
 if __name__ == "__main__":

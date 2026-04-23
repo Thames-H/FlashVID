@@ -203,6 +203,39 @@ def _merge_visual_inputs(
     return visual_pos_masks, deepstack_visual_embeds
 
 
+def _build_message_video_kwargs(
+    min_pixels: int,
+    max_pixels: int,
+    max_num_frames: int,
+    fps: Optional[float],
+):
+    video_kwargs = {
+        "max_pixels": max_pixels,
+        "min_pixels": min_pixels,
+    }
+    if fps is not None:
+        video_kwargs["fps"] = fps
+        video_kwargs["max_frames"] = max_num_frames
+    else:
+        video_kwargs["nframes"] = max_num_frames
+    return video_kwargs
+
+
+def _build_processor_video_kwargs(video_kwargs_qwen):
+    if video_kwargs_qwen is None:
+        return {}
+    processor_video_kwargs = dict(video_kwargs_qwen)
+    for key in (
+        "nframes",
+        "fps",
+        "max_frames",
+        "min_frames",
+        "sample_fps",
+    ):
+        processor_video_kwargs.pop(key, None)
+    return processor_video_kwargs
+
+
 def _slice_attention_mask(attention_mask, keep_indices):
     if attention_mask is None:
         return None
@@ -748,18 +781,15 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
             ]
             gen_kwargs = all_gen_kwargs[0]
 
-            video_kwargs = {
-                "max_pixels": self.max_pixels,
-                "min_pixels": self.min_pixels,
-            }
-            if self.fps is not None:
-                video_kwargs["fps"] = self.fps
-                video_kwargs["max_frames"] = self.max_num_frames
-            else:
-                video_kwargs["nframes"] = self.max_num_frames
+            message_video_kwargs = _build_message_video_kwargs(
+                min_pixels=self.min_pixels,
+                max_pixels=self.max_pixels,
+                max_num_frames=self.max_num_frames,
+                fps=self.fps,
+            )
 
             batched_messages = [
-                chat_message.to_hf_messages(video_kwargs=video_kwargs)
+                chat_message.to_hf_messages(video_kwargs=message_video_kwargs)
                 for chat_message in chat_messages
             ]
             texts = self.processor.apply_chat_template(
@@ -774,7 +804,9 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
                 image_patch_size=16,
                 return_video_metadata=True,
             )
-            video_kwargs = {**video_kwargs, **video_kwargs_qwen}
+            processor_video_kwargs = _build_processor_video_kwargs(
+                video_kwargs_qwen
+            )
 
             video_metadatas = None
             if video_inputs is not None:
@@ -788,7 +820,7 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
                     images=image_inputs,
                     videos=video_inputs,
                     video_metadata=video_metadatas,
-                    **video_kwargs,
+                    **processor_video_kwargs,
                     do_resize=False,
                     padding=True,
                     padding_side="left",
@@ -800,7 +832,7 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
                     images=image_inputs,
                     videos=video_inputs,
                     video_metadata=video_metadatas,
-                    **video_kwargs,
+                    **processor_video_kwargs,
                     do_resize=False,
                     return_tensors="pt",
                 )

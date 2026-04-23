@@ -18,10 +18,13 @@ def compute_sink_retention(artifacts: list[dict], keep_ratio: str) -> dict[str, 
         sink_indices = set(torch.where(sink_mask)[0].tolist())
         if not sink_indices:
             continue
+        ratio_selection = artifact.get("selections", {}).get(keep_ratio, {})
         for method in results:
-            selected = set(
-                artifact["selections"][keep_ratio][method]["indices"].tolist()
-            )
+            selection = ratio_selection.get(method)
+            if selection is None:
+                results[method].append(0.0)
+                continue
+            selected = set(selection["indices"].tolist())
             results[method].append(len(selected & sink_indices) / len(sink_indices))
     return {
         method: float(np.mean(values)) if values else 0.0
@@ -58,4 +61,3 @@ def plot_sink_retention(artifacts_by_model: dict[str, list[dict]]):
 
     fig.tight_layout()
     return fig
-

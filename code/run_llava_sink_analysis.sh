@@ -36,7 +36,7 @@ run_collect() {
     local keep_ratio="$2"
     shift 2
 
-    "${SINK_SCRIPT_DIR}/collect_llava.sh" \
+    bash "${SINK_SCRIPT_DIR}/collect_llava.sh" \
         --method "${method_name}" \
         --keep-ratio "${keep_ratio}" \
         --tasks "${TASKS_CSV}" \
@@ -53,7 +53,7 @@ echo "ratios: ${RATIOS_CSV}"
 echo "resume: ${RESUME}"
 
 echo "stage: full"
-"${SINK_SCRIPT_DIR}/collect_llava.sh" \
+bash "${SINK_SCRIPT_DIR}/collect_llava.sh" \
     --method full \
     --tasks "${TASKS_CSV}" \
     --limit "${LIMIT}" \
@@ -71,7 +71,7 @@ for ratio in "${RATIOS[@]}"; do
 done
 
 echo "stage: merge"
-"${SINK_SCRIPT_DIR}/merge.sh"
+bash "${SINK_SCRIPT_DIR}/merge.sh"
 
 echo "stage: build-ablation"
 python -m sink_analysis.cli --repo-root "${PROJECT_ROOT}" build-ablation
@@ -93,7 +93,7 @@ for ratio in "${RATIOS[@]}"; do
 done
 
 echo "stage: analyze"
-"${SINK_SCRIPT_DIR}/analyze.sh"
+bash "${SINK_SCRIPT_DIR}/analyze.sh"
 
 echo "done"
 echo "report: ${PROJECT_ROOT}/sink_analysis/report.md"

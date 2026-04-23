@@ -82,23 +82,10 @@ def _compute_fes_scores(
     use_alpha: bool = True,
     use_deviation: bool = True,
 ) -> torch.Tensor:
-    text_positions = _align_index_device(text_positions, attn_logits)
-    visual_positions_for_logits = _align_index_device(
-        visual_positions,
-        attn_logits,
-    )
-    visual_positions_for_values = _align_index_device(
-        visual_positions,
-        value_states,
-    )
     compact_logits = attn_logits.index_select(2, text_positions).index_select(
-        3,
-        visual_positions_for_logits,
+        3, visual_positions
     )
-    compact_values = value_states.index_select(
-        2,
-        visual_positions_for_values,
-    )
+    compact_values = value_states.index_select(2, visual_positions)
     return _compute_fes_scores_from_compact_inputs(
         text_to_vis_logits=compact_logits,
         visual_value_states=compact_values,
@@ -136,21 +123,26 @@ def _get_suffix_text_positions(
     return non_visual_positions[non_visual_positions > visual_positions[-1]]
 
 
-def _concat_visual_feature_splits(hidden_states):
+def _flatten_visual_tensor(hidden_states, merger=None):
     if hidden_states is None:
         return None
     if isinstance(hidden_states, (list, tuple)):
-        parts = [_concat_visual_feature_splits(part) for part in hidden_states]
+        parts = [
+            _flatten_visual_tensor(part, merger=merger)
+            for part in hidden_states
+        ]
         parts = [part for part in parts if part is not None]
         if not parts:
             return None
-        if len(parts) == 1:
-            return parts[0]
         return torch.cat(parts, dim=0)
+    if hidden_states.ndim == 3:
+        if merger is not None:
+            return merger(hidden_states)
+        return hidden_states.reshape(-1, hidden_states.shape[-1])
     return hidden_states
 
 
-def _unpack_visual_outputs(outputs):
+def _unpack_visual_outputs(outputs, merger=None):
     last_hidden_state = getattr(outputs, "last_hidden_state", None)
     deepstack_features = getattr(outputs, "deepstack_features", None)
 
@@ -160,108 +152,16 @@ def _unpack_visual_outputs(outputs):
         if len(outputs) > 1:
             deepstack_features = outputs[-1]
 
-    last_hidden_state = _concat_visual_feature_splits(last_hidden_state)
+    last_hidden_state = _flatten_visual_tensor(
+        last_hidden_state, merger=merger
+    )
     if deepstack_features is not None:
-        if not isinstance(deepstack_features, (list, tuple)):
-            deepstack_features = [deepstack_features]
         deepstack_features = [
-            _concat_visual_feature_splits(feature)
+            _flatten_visual_tensor(feature, merger=merger)
             for feature in deepstack_features
         ]
 
     return last_hidden_state, deepstack_features
-
-
-def _expected_qwen_visual_token_counts(
-    grid_thw: Optional[torch.Tensor],
-    spatial_merge_size: int,
-) -> tuple[Optional[int], Optional[int]]:
-    if grid_thw is None:
-        return None, None
-    merge_unit = max(1, int(spatial_merge_size) ** 2)
-    raw_tokens = int(grid_thw.prod(-1).sum().item())
-    merged_tokens = int((grid_thw.prod(-1) // merge_unit).sum().item())
-    return merged_tokens, raw_tokens
-
-
-def _maybe_merge_qwen_visual_outputs(
-    model,
-    visual_embeds: Optional[torch.Tensor],
-    deepstack_features,
-    grid_thw: Optional[torch.Tensor],
-):
-    if visual_embeds is None or grid_thw is None:
-        return visual_embeds, deepstack_features
-
-    visual_model = getattr(model, "visual", None)
-    if visual_model is None or not hasattr(visual_model, "merger"):
-        return visual_embeds, deepstack_features
-
-    spatial_merge_size = getattr(
-        visual_model,
-        "spatial_merge_size",
-        getattr(model.config.vision_config, "spatial_merge_size", 1),
-    )
-    expected_tokens, raw_tokens = _expected_qwen_visual_token_counts(
-        grid_thw,
-        spatial_merge_size,
-    )
-    if expected_tokens is None or raw_tokens is None:
-        return visual_embeds, deepstack_features
-    if visual_embeds.shape[0] == expected_tokens:
-        return visual_embeds, deepstack_features
-    if visual_embeds.shape[0] != raw_tokens or expected_tokens == raw_tokens:
-        return visual_embeds, deepstack_features
-
-    visual_embeds = visual_model.merger(visual_embeds)
-
-    if deepstack_features is not None:
-        merger_list = list(getattr(visual_model, "deepstack_merger_list", []))
-        normalized_features = []
-        for idx, feature in enumerate(deepstack_features):
-            if feature is None:
-                normalized_features.append(feature)
-                continue
-            if feature.shape[0] == expected_tokens:
-                normalized_features.append(feature)
-                continue
-            if feature.shape[0] == raw_tokens and idx < len(merger_list):
-                normalized_features.append(merger_list[idx](feature))
-                continue
-            normalized_features.append(feature)
-        deepstack_features = normalized_features
-
-    return visual_embeds, deepstack_features
-
-
-def _build_qwen_message_video_kwargs(
-    *,
-    max_pixels: int,
-    min_pixels: int,
-    max_num_frames: int,
-    fps: Optional[float],
-) -> dict:
-    video_kwargs = {
-        "max_pixels": max_pixels,
-        "min_pixels": min_pixels,
-    }
-    if fps is not None:
-        video_kwargs["fps"] = fps
-        video_kwargs["max_frames"] = max_num_frames
-    else:
-        video_kwargs["nframes"] = max_num_frames
-    return video_kwargs
-
-
-def _build_qwen_processor_video_kwargs(video_kwargs_qwen: Optional[dict]) -> dict:
-    if not video_kwargs_qwen:
-        return {}
-    processor_safe_keys = {"do_sample_frames"}
-    return {
-        key: value
-        for key, value in video_kwargs_qwen.items()
-        if key in processor_safe_keys
-    }
 
 
 def _merge_visual_inputs(
@@ -303,19 +203,6 @@ def _merge_visual_inputs(
     return visual_pos_masks, deepstack_visual_embeds
 
 
-def _align_index_device(
-    index: torch.Tensor,
-    reference: Union[torch.Tensor, torch.device],
-) -> torch.Tensor:
-    if isinstance(reference, torch.Tensor):
-        target_device = reference.device
-    else:
-        target_device = reference
-    if index.device == target_device:
-        return index
-    return index.to(target_device)
-
-
 def _slice_attention_mask(attention_mask, keep_indices):
     if attention_mask is None:
         return None
@@ -325,8 +212,6 @@ def _slice_attention_mask(attention_mask, keep_indices):
         for key, value in attention_mask.items():
             pruned[key] = _slice_attention_mask(value, keep_indices)
         return pruned
-
-    keep_indices = _align_index_device(keep_indices, attention_mask)
 
     if attention_mask.ndim == 2:
         return attention_mask[:, keep_indices]
@@ -341,7 +226,6 @@ def _slice_position_embeddings(position_embeddings, positions: torch.Tensor):
     cos, sin = position_embeddings
     if positions.numel() == 0:
         return cos[:, :0, :], sin[:, :0, :]
-    positions = _align_index_device(positions, cos)
     return cos.index_select(1, positions), sin.index_select(1, positions)
 
 
@@ -385,15 +269,8 @@ def _forward_extract(
             attn_module = layer.self_attn
             bsz = hidden_normed.size(0)
             n_vis = visual_positions.numel()
-            layer_visual_positions = _align_index_device(
-                visual_positions,
-                hidden_normed,
-            )
 
-            visual_hidden = hidden_normed.index_select(
-                1,
-                layer_visual_positions,
-            )
+            visual_hidden = hidden_normed.index_select(1, visual_positions)
             visual_shape = (bsz, n_vis, -1, attn_module.head_dim)
             key_states = attn_module.k_proj(visual_hidden).view(visual_shape)
             value_states = attn_module.v_proj(visual_hidden).view(visual_shape)
@@ -403,7 +280,7 @@ def _forward_extract(
 
             visual_cos, visual_sin = _slice_position_embeddings(
                 position_embeddings,
-                layer_visual_positions,
+                visual_positions,
             )
             key_states, _ = apply_rotary_pos_emb(
                 key_states,
@@ -423,14 +300,7 @@ def _forward_extract(
                     n_vis,
                 )
             else:
-                layer_text_positions = _align_index_device(
-                    text_positions,
-                    hidden_normed,
-                )
-                text_hidden = hidden_normed.index_select(
-                    1,
-                    layer_text_positions,
-                )
+                text_hidden = hidden_normed.index_select(1, text_positions)
                 text_shape = (
                     bsz,
                     text_positions.numel(),
@@ -442,7 +312,7 @@ def _forward_extract(
 
                 text_cos, text_sin = _slice_position_embeddings(
                     position_embeddings,
-                    layer_text_positions,
+                    text_positions,
                 )
                 query_states, _ = apply_rotary_pos_emb(
                     query_states,
@@ -525,13 +395,7 @@ def _make_fetp_forward(
                 pixel_values, image_grid_thw
             )
             image_embeds, deepstack_image_embeds = _unpack_visual_outputs(
-                image_outputs
-            )
-            image_embeds, deepstack_image_embeds = _maybe_merge_qwen_visual_outputs(
-                self,
-                image_embeds,
-                deepstack_image_embeds,
-                image_grid_thw,
+                image_outputs, merger=self.visual.merger
             )
             image_embeds = image_embeds.to(
                 inputs_embeds.device, inputs_embeds.dtype
@@ -551,13 +415,7 @@ def _make_fetp_forward(
                 pixel_values_videos, video_grid_thw
             )
             video_embeds, deepstack_video_embeds = _unpack_visual_outputs(
-                video_outputs
-            )
-            video_embeds, deepstack_video_embeds = _maybe_merge_qwen_visual_outputs(
-                self,
-                video_embeds,
-                deepstack_video_embeds,
-                video_grid_thw,
+                video_outputs, merger=self.visual.merger
             )
             video_embeds = video_embeds.to(
                 inputs_embeds.device, inputs_embeds.dtype
@@ -713,12 +571,7 @@ def _make_fetp_forward(
                 keep_global_indices = torch.cat(
                     [
                         non_visual_positions,
-                        visual_positions[
-                            _align_index_device(
-                                keep_visual_local,
-                                visual_positions,
-                            )
-                        ],
+                        visual_positions[keep_visual_local],
                     ],
                     dim=0,
                 ).sort().values
@@ -730,47 +583,25 @@ def _make_fetp_forward(
                 inputs_embeds = torch.gather(
                     inputs_embeds, dim=1, index=gather_index
                 )
-                keep_indices_for_position_ids = _align_index_device(
-                    keep_global_indices,
-                    position_ids,
-                )
-                position_ids = position_ids[:, :, keep_indices_for_position_ids]
+                position_ids = position_ids[:, :, keep_global_indices]
                 attention_mask = _slice_attention_mask(
                     attention_mask, keep_global_indices
                 )
-                cache_position = cache_position[
-                    _align_index_device(keep_global_indices, cache_position)
-                ]
+                cache_position = cache_position[keep_global_indices]
 
                 if visual_pos_masks is not None:
                     original_visual_positions = torch.where(
                         visual_pos_masks[0]
                     )[0]
-                    keep_indices_for_visual_mask = _align_index_device(
-                        keep_global_indices,
-                        original_visual_positions,
-                    )
                     joint_visual_keep_indices = torch.where(
                         torch.isin(
-                            original_visual_positions,
-                            keep_indices_for_visual_mask,
+                            original_visual_positions, keep_global_indices
                         )
                     )[0]
-                    visual_pos_masks = visual_pos_masks[
-                        :,
-                        _align_index_device(
-                            keep_global_indices,
-                            visual_pos_masks,
-                        ),
-                    ]
+                    visual_pos_masks = visual_pos_masks[:, keep_global_indices]
                     if deepstack_visual_embeds is not None:
                         deepstack_visual_embeds = [
-                            embed[
-                                _align_index_device(
-                                    joint_visual_keep_indices,
-                                    embed,
-                                )
-                            ]
+                            embed[joint_visual_keep_indices]
                             for embed in deepstack_visual_embeds
                         ]
             else:
@@ -917,15 +748,18 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
             ]
             gen_kwargs = all_gen_kwargs[0]
 
-            message_video_kwargs = _build_qwen_message_video_kwargs(
-                max_pixels=self.max_pixels,
-                min_pixels=self.min_pixels,
-                max_num_frames=self.max_num_frames,
-                fps=self.fps,
-            )
+            video_kwargs = {
+                "max_pixels": self.max_pixels,
+                "min_pixels": self.min_pixels,
+            }
+            if self.fps is not None:
+                video_kwargs["fps"] = self.fps
+                video_kwargs["max_frames"] = self.max_num_frames
+            else:
+                video_kwargs["nframes"] = self.max_num_frames
 
             batched_messages = [
-                chat_message.to_hf_messages(video_kwargs=message_video_kwargs)
+                chat_message.to_hf_messages(video_kwargs=video_kwargs)
                 for chat_message in chat_messages
             ]
             texts = self.processor.apply_chat_template(
@@ -940,9 +774,7 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
                 image_patch_size=16,
                 return_video_metadata=True,
             )
-            processor_video_kwargs = _build_qwen_processor_video_kwargs(
-                video_kwargs_qwen
-            )
+            video_kwargs = {**video_kwargs, **video_kwargs_qwen}
 
             video_metadatas = None
             if video_inputs is not None:
@@ -956,7 +788,7 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
                     images=image_inputs,
                     videos=video_inputs,
                     video_metadata=video_metadatas,
-                    **processor_video_kwargs,
+                    **video_kwargs,
                     do_resize=False,
                     padding=True,
                     padding_side="left",
@@ -968,7 +800,7 @@ class Qwen3_VL_Ours_V2(Qwen3_VLSimple):
                     images=image_inputs,
                     videos=video_inputs,
                     video_metadata=video_metadatas,
-                    **processor_video_kwargs,
+                    **video_kwargs,
                     do_resize=False,
                     return_tensors="pt",
                 )

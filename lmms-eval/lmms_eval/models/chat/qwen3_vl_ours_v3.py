@@ -558,7 +558,7 @@ def _make_fetp_forward(
                 pixel_values, image_grid_thw
             )
             image_embeds, deepstack_image_embeds = _unpack_visual_outputs(
-                image_outputs
+                image_outputs, merger=self.visual.merger
             )
             image_embeds = image_embeds.to(
                 inputs_embeds.device, inputs_embeds.dtype
@@ -578,7 +578,7 @@ def _make_fetp_forward(
                 pixel_values_videos, video_grid_thw
             )
             video_embeds, deepstack_video_embeds = _unpack_visual_outputs(
-                video_outputs
+                video_outputs, merger=self.visual.merger
             )
             video_embeds = video_embeds.to(
                 inputs_embeds.device, inputs_embeds.dtype

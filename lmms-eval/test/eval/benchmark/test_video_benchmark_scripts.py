@@ -75,3 +75,17 @@ class TestVideoBenchmarkScripts(TestCase):
         self.assertIn('"videomme"', text)
         self.assertIn('"longvideobench_val_v"', text)
         self.assertNotIn("<<<", text)
+
+    def test_qwen_original_video_script_exists_and_uses_expected_model(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        script_path = repo_root / "scripts" / "ours_v3" / "qwen3_vl_8b_video_original.sh"
+
+        self.assertTrue(script_path.exists(), "Qwen3-VL original video script should exist")
+
+        text = script_path.read_text(encoding="utf-8")
+        self.assertIn("--model qwen3_vl_original", text)
+        self.assertIn('AUTODL_MODEL_PATH="$HOME/autodl-tmp/Qwen3-VL-8B-Instruct"', text)
+        self.assertIn('DEFAULT_PRETRAINED="Qwen/Qwen3-VL-8B-Instruct"', text)
+        self.assertRegex(text, re.compile(r"^MAX_NUM_FRAMES=32$", re.MULTILINE))
+        self.assertRegex(text, re.compile(r'^ATTN_IMPLEMENTATION="flash_attention_2"$', re.MULTILINE))
+        self.assertRegex(text, re.compile(r'^TASKS=\("videomme" "longvideobench_val_v"\)$', re.MULTILINE))

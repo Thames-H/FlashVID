@@ -52,6 +52,21 @@ class TestSinkAnalysisScripts(TestCase):
         self.assertIn("label.lower() == 'full'", llava_text)
         self.assertIn("label.lower() == 'full'", qwen_text)
 
+    def test_collect_scripts_use_registered_full_model_names_and_guard_resume_find(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        llava_script = repo_root / "scripts" / "sink_analysis" / "collect_llava.sh"
+        qwen_script = repo_root / "scripts" / "sink_analysis" / "collect_qwen3.sh"
+
+        llava_text = llava_script.read_text(encoding="utf-8")
+        qwen_text = qwen_script.read_text(encoding="utf-8")
+
+        self.assertIn('MODEL_NAME="llava_hf"', llava_text)
+        self.assertIn('MODEL_NAME="qwen3_vl"', qwen_text)
+        self.assertIn('-d "${RUN_ROOT}"', llava_text)
+        self.assertIn('-d "${RUN_ROOT}"', qwen_text)
+        self.assertIn("No results json produced under", llava_text)
+        self.assertIn("No results json produced under", qwen_text)
+
     def test_code_wrapper_scripts_exist_for_pull_and_llava_only_run(self):
         repo_root = Path(__file__).resolve().parents[4]
         pull_script = repo_root / "code" / "pull_attn_sink.sh"

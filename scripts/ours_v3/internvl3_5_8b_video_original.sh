@@ -25,7 +25,13 @@ if [[ "$NUM_PROCESSES" != "1" && "$DEVICE_MAP" == "auto" ]]; then
 fi
 
 if [[ -n "${TASKS_CSV:-}" ]]; then
-    IFS=',' read -r -a TASKS <<< "${TASKS_CSV}"
+    OLD_IFS="$IFS"
+    IFS=','
+    TASKS=()
+    for task in ${TASKS_CSV}; do
+        TASKS+=("$task")
+    done
+    IFS="$OLD_IFS"
 else
     TASKS=("videomme" "longvideobench_val_v")
 fi

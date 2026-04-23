@@ -53,7 +53,7 @@ if [[ -z "${METHOD}" ]]; then
 fi
 
 KEEP_RATIO_SLUG="${KEEP_RATIO//%/pct}"
-RETENTION_RATIO="$(python -c "label='${KEEP_RATIO}'; print(float(label.rstrip('%'))/100.0 if label.endswith('%') else float(label))" )"
+RETENTION_RATIO="$(python -c "label='${KEEP_RATIO}'.strip(); print(1.0 if label.lower() == 'full' else (float(label.rstrip('%'))/100.0 if label.endswith('%') else float(label)))" )"
 
 PRETRAINED="${PRETRAINED:-llava-hf/llava-onevision-qwen2-7b-ov-hf}"
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"

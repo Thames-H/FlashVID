@@ -142,3 +142,48 @@ class TestLlavaOnevisionMMTokCompat(TestCase):
         self.assertTrue(
             torch.equal(outputs.last_hidden_state, expected_last_hidden_state)
         )
+
+    def test_decode_only_step_preserves_existing_sink_analysis_export(self):
+        embedding = torch.nn.Embedding(32, 4)
+        model = SimpleNamespace(
+            _mmtok_core=SimpleNamespace(),
+            _sink_analysis_last_export={
+                "method": "mmtok",
+                "indices": torch.tensor([0, 2]),
+            },
+            get_input_embeddings=lambda: embedding,
+        )
+
+        sentinel = object()
+        with patch.object(
+            llava_mmtok,
+            "_forward_without_mmtok",
+            return_value=sentinel,
+        ):
+            outputs = llava_mmtok.LlavaOnevision_MMTok.forward(
+                model,
+                input_ids=torch.tensor([[1, 2, 3]]),
+                pixel_values=None,
+                image_sizes=None,
+                pixel_values_videos=None,
+                image_sizes_videos=None,
+                attention_mask=None,
+                position_ids=None,
+                past_key_values=None,
+                inputs_embeds=None,
+                vision_feature_layer=0,
+                vision_feature_select_strategy=None,
+                vision_aspect_ratio=None,
+                batch_num_images=None,
+                use_cache=False,
+            )
+
+        self.assertIs(outputs, sentinel)
+        self.assertIsNotNone(model._sink_analysis_last_export)
+        self.assertEqual(model._sink_analysis_last_export["method"], "mmtok")
+        self.assertTrue(
+            torch.equal(
+                model._sink_analysis_last_export["indices"],
+                torch.tensor([0, 2]),
+            )
+        )

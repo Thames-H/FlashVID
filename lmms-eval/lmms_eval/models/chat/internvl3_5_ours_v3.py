@@ -866,7 +866,7 @@ class InternVL3_5_Ours_V3(InternVLHf):
         max_score_heads: Optional[int] = None,
         use_alpha: bool = True,
         use_deviation: bool = True,
-        two_stage: bool = True,
+        two_stage: bool = False,
         text_chunk_size: Optional[int] = 32,
         profile_reference_scoring: bool = False,
         reference_scoring_method: str = "shallow",

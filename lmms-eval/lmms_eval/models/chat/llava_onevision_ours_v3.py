@@ -932,7 +932,7 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         target_layer: int = 15,
         use_alpha: bool = True,
         use_deviation: bool = True,
-        two_stage: bool = True,
+        two_stage: bool = False,
         text_chunk_size: Optional[int] = 32,
         **kwargs,
     ) -> None:

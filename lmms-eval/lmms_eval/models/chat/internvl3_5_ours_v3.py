@@ -879,6 +879,30 @@ class InternVL3_5_Ours_V3(InternVLHf):
         super().__init__(pretrained=pretrained, **kwargs)
 
         self.retention_ratio = retention_ratio
+        self.scoring_method = scoring_method
+        self.shallow_layers = shallow_layers
+        self.target_layer = target_layer
+        self.use_alpha = use_alpha
+        self.use_deviation = use_deviation
+        self.two_stage = two_stage
+        self.candidate_ratio = candidate_ratio
+        self.max_score_text_tokens = max_score_text_tokens
+        self.max_score_heads = max_score_heads
+        self.text_chunk_size = text_chunk_size
+        self._cache_identity = {
+            "retention_ratio": retention_ratio,
+            "scoring_method": scoring_method,
+            "shallow_layers": shallow_layers,
+            "target_layer": target_layer,
+            "anchor_layers": anchor_layers,
+            "use_alpha": use_alpha,
+            "use_deviation": use_deviation,
+            "two_stage": two_stage,
+            "candidate_ratio": candidate_ratio,
+            "max_score_text_tokens": max_score_text_tokens,
+            "max_score_heads": max_score_heads,
+            "text_chunk_size": text_chunk_size,
+        }
         eval_logger.info(
             "[InternVL3_5_Ours_V3 / FETP] "
             f"retention_ratio={retention_ratio}, "

@@ -49,20 +49,121 @@ class lmms(abc.ABC):
         eval_logger.info(f"Resolved model folder for cache: {self._cache_dir}")
         self.initialized_cache_dir = True
 
+    def _normalize_cache_identity_value(self, value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, (list, tuple)):
+            return [self._normalize_cache_identity_value(item) for item in value]
+        if isinstance(value, set):
+            return sorted(self._normalize_cache_identity_value(item) for item in value)
+        return str(value)
+
+    def _cache_identity_items(self) -> Dict[str, Any]:
+        identity: Dict[str, Any] = {}
+        explicit_identity = getattr(self, "_cache_identity", None)
+        if isinstance(explicit_identity, dict):
+            identity.update(explicit_identity)
+
+        attr_names = (
+            "path",
+            "pretrained",
+            "model_name",
+            "model_version",
+            "model_id",
+            "device_map",
+            "attn_implementation",
+            "use_cache",
+            "low_cpu_mem_usage",
+            "fps",
+            "num_frames",
+            "max_num_frames",
+            "min_patches",
+            "max_patches",
+            "min_pixels",
+            "max_pixels",
+            "retention_ratio",
+            "two_stage",
+            "target_layer",
+            "shallow_layers",
+            "scoring_method",
+            "text_chunk_size",
+            "use_alpha",
+            "use_deviation",
+            "candidate_ratio",
+            "max_score_text_tokens",
+            "max_score_heads",
+        )
+        for attr_name in attr_names:
+            if attr_name in identity:
+                continue
+            value = getattr(self, attr_name, None)
+            if value is not None and not callable(value):
+                identity[attr_name] = value
+
+        return {
+            key: self._normalize_cache_identity_value(value)
+            for key, value in sorted(identity.items())
+        }
+
+    def _sanitize_cache_fragment(self, value: Any) -> str:
+        text = str(value)
+        text = text.replace("\\", "_").replace("/", "_")
+        text = text.replace(" ", "")
+        text = text.replace(".", "p").replace("-", "m")
+        return "".join(char if char.isalnum() or char in ("_", "=") else "_" for char in text)
+
+    def _format_cache_identity_summary(self, identity: Dict[str, Any]) -> str:
+        readable_keys = (
+            ("retention_ratio", "rr"),
+            ("two_stage", "ts"),
+            ("target_layer", "tl"),
+            ("scoring_method", "score"),
+            ("num_frames", "nf"),
+            ("max_num_frames", "mnf"),
+            ("max_patches", "mp"),
+            ("attn_implementation", "attn"),
+        )
+        parts = []
+        for key, label in readable_keys:
+            if key in identity:
+                parts.append(f"{label}{self._sanitize_cache_fragment(identity[key])}")
+        if not parts:
+            return ""
+        return "_" + "_".join(parts)[:120]
+
     def generate_cache_folder_hash_name(self, model_name: str):
         """
         Generate a cache hash for a model
         """
         task_dict_keys = list(self.task_dict.keys())
         class_name = type(self).__name__
-        hash_string = "|".join(task_dict_keys)
+        identity = self._cache_identity_items()
+        hash_payload = {
+            "class": class_name,
+            "model": model_name,
+            "tasks": task_dict_keys,
+            "identity": identity,
+        }
+        hash_string = json.dumps(
+            hash_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
 
         text_hash = unicodedata.normalize("NFC", hash_string)
         text_hash = text_hash.replace("\r\n", "\n").replace("\r", "\n")
 
         hash_string = hashlib.sha256(text_hash.encode("utf-8")).hexdigest()
         model_name = os.path.basename(model_name)
-        folder_name = class_name + "_" + model_name + "_" + hash_string
+        folder_name = (
+            class_name
+            + "_"
+            + model_name
+            + self._format_cache_identity_summary(identity)
+            + "_"
+            + hash_string
+        )
         return folder_name
 
     def _resolve_model_name_for_cache(self) -> str:
@@ -70,7 +171,7 @@ class lmms(abc.ABC):
         Best-effort resolution of a human-readable model identifier for cache naming.
         Checks common attributes; falls back to class name.
         """
-        for attr_name in ("model_name", "model_version", "model_id", "pretrained", "fps", "max_pixels", "min_pixels"):
+        for attr_name in ("path", "model_name", "model_version", "model_id", "pretrained", "fps", "max_pixels", "min_pixels"):
             value = getattr(self, attr_name, None)
             if isinstance(value, str) and value:
                 return value

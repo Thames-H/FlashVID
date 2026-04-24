@@ -1042,7 +1042,28 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
         )
 
         self.retention_ratio = retention_ratio
+        self.scoring_method = scoring_method
+        self.shallow_layers = shallow_layers
+        self.target_layer = target_layer
+        self.use_alpha = use_alpha
+        self.use_deviation = use_deviation
+        self.two_stage = two_stage
+        self.text_chunk_size = text_chunk_size
         self.stats_output_path = stats_output_path
+        self._cache_identity = {
+            "retention_ratio": retention_ratio,
+            "scoring_method": scoring_method,
+            "shallow_layers": shallow_layers,
+            "target_layer": target_layer,
+            "use_alpha": use_alpha,
+            "use_deviation": use_deviation,
+            "two_stage": two_stage,
+            "text_chunk_size": text_chunk_size,
+            "candidate_ratio": candidate_ratio,
+            "max_score_text_tokens": max_score_text_tokens,
+            "max_score_heads": max_score_heads,
+            "reference_scoring_method": reference_scoring_method,
+        }
 
         if scoring_method == "anchor":
             eval_logger.warning(

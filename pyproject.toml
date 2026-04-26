@@ -7,7 +7,8 @@ description = "FlashVID: Efficient Video Large Language Models via Training-free
 authors = [{ name = "Ziyang Fan", email = "bugkiller.fzy@gmail.com" }]
 requires-python = ">=3.10"
 dependencies = [
-    "decord>=0.6.0",
+    "decord>=0.6.0; platform_system != 'Darwin'",
+    "eva-decord>=0.6.1; platform_system == 'Darwin'",
     "lmms-eval>=0.5.0",
     "torch>=2.5.1",
     "torchvision>=0.20.1",

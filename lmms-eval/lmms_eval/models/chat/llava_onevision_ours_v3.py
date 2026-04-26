@@ -951,7 +951,25 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             **kwargs,
         )
 
+        retention_ratio = float(retention_ratio)
+        scoring_method = str(scoring_method)
+        shallow_layers = int(shallow_layers)
+        target_layer = int(target_layer)
+        text_chunk_size = (
+            None if text_chunk_size is None else int(text_chunk_size)
+        )
+
         self.retention_ratio = retention_ratio
+        self.scoring_method = scoring_method
+        self.shallow_layers = shallow_layers
+        self.target_layer = target_layer
+        self.use_alpha = bool(use_alpha)
+        self.use_deviation = bool(use_deviation)
+        self.two_stage = bool(two_stage)
+        self.text_chunk_size = text_chunk_size
+        self.attn_implementation = attn_implementation
+        self.max_num_frames = max_frames_num
+
         eval_logger.info(
             "[LlavaOnevisionOursV3 / FETP-v3] "
             f"retention_ratio={retention_ratio}, "
@@ -969,8 +987,8 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             scoring_method=scoring_method,
             shallow_layers=shallow_layers,
             target_layer=target_layer,
-            use_alpha=use_alpha,
-            use_deviation=use_deviation,
-            two_stage=two_stage,
+            use_alpha=self.use_alpha,
+            use_deviation=self.use_deviation,
+            two_stage=self.two_stage,
             text_chunk_size=text_chunk_size,
         )

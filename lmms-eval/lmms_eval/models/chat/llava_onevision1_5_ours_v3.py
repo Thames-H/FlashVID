@@ -2,7 +2,7 @@
 
 import importlib
 import math
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +10,7 @@ from loguru import logger as eval_logger
 from transformers.cache_utils import DynamicCache
 from transformers.utils import is_torchdynamo_compiling
 
+from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 
 from .llava_onevision1_5 import Llava_OneVision1_5 as LlavaOneVision1_5Chat
@@ -787,6 +788,15 @@ class LlavaOneVision1_5OursV3(LlavaOneVision1_5Chat):
             None if text_chunk_size is None else int(text_chunk_size)
         )
 
+        self.retention_ratio = retention_ratio
+        self.scoring_method = scoring_method
+        self.shallow_layers = shallow_layers
+        self.target_layer = target_layer
+        self.use_alpha = bool(use_alpha)
+        self.use_deviation = bool(use_deviation)
+        self.two_stage = bool(two_stage)
+        self.text_chunk_size = text_chunk_size
+
         eval_logger.info(
             "[LlavaOneVision1_5OursV3 / FETP-v3] "
             f"retention_ratio={retention_ratio}, "
@@ -805,8 +815,32 @@ class LlavaOneVision1_5OursV3(LlavaOneVision1_5Chat):
             scoring_method=scoring_method,
             shallow_layers=shallow_layers,
             target_layer=target_layer,
-            use_alpha=bool(use_alpha),
-            use_deviation=bool(use_deviation),
-            two_stage=bool(two_stage),
+            use_alpha=self.use_alpha,
+            use_deviation=self.use_deviation,
+            two_stage=self.two_stage,
             text_chunk_size=text_chunk_size,
+        )
+
+    def generate_until(self, requests: List[Instance]) -> List[str]:
+        original_requests = list(requests)
+        cached_responses, pending_requests = self.split_requests_by_cache(
+            original_requests
+        )
+        if not pending_requests:
+            return self.merge_cached_and_new_responses(
+                original_requests,
+                cached_responses,
+                [],
+                [],
+            )
+
+        pending_responses = super().generate_until(pending_requests)
+        for request, response in zip(pending_requests, pending_responses):
+            self.add_request_response_to_cache(request, response)
+
+        return self.merge_cached_and_new_responses(
+            original_requests,
+            cached_responses,
+            pending_requests,
+            pending_responses,
         )

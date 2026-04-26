@@ -15,6 +15,7 @@ MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-18906}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 LOG_SAMPLES_SUFFIX="${LOG_SAMPLES_SUFFIX:-llava_onevision1_5_ours_v3_8b_video}"
 OUTPUT_PATH="${OUTPUT_PATH:-${PROJECT_ROOT}/logs/ours_v3_llava_onevision1_5_8b_video}"
+CACHE_REQUESTS="${CACHE_REQUESTS:-true}"
 
 if [[ -n "${TASKS_CSV:-}" ]]; then
     IFS=',' read -r -a TASKS <<< "${TASKS_CSV}"
@@ -48,6 +49,11 @@ ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
 DEVICE="${DEVICE:-}"
 DEVICE_MAP="${DEVICE_MAP:-}"
 
+REQUEST_CACHE_ARGS=()
+if [[ -n "$CACHE_REQUESTS" ]]; then
+    REQUEST_CACHE_ARGS=(--cache_requests "$CACHE_REQUESTS")
+fi
+
 BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_num_frames=$MAX_NUM_FRAMES,max_pixels=$MAX_PIXELS,min_pixels=$MIN_PIXELS,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE"
 if [[ -n "$FPS" ]]; then
     BASE_MODEL_ARGS="$BASE_MODEL_ARGS,fps=$FPS"
@@ -72,6 +78,7 @@ for retention_ratio in "${RETENTION_RATIOS[@]}"; do
             --model_args "$MODEL_ARGS" \
             --tasks "$task" \
             --batch_size "$BATCH_SIZE" \
+            "${REQUEST_CACHE_ARGS[@]}" \
             --log_samples \
             --log_samples_suffix "$LOG_SAMPLES_SUFFIX" \
             --output_path "$OUTPUT_PATH"

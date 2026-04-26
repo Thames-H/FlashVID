@@ -1,5 +1,10 @@
-decord>=0.6.0
 lmms-eval>=0.5.0
 torch>=2.5.1
 torchvision>=0.20.1
 transformers==4.57.3
+
+[:platform_system != "Darwin"]
+decord>=0.6.0
+
+[:platform_system == "Darwin"]
+eva-decord>=0.6.1

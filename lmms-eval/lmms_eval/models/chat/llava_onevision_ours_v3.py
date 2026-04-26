@@ -926,6 +926,7 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         chat_template: Optional[str] = None,
         use_cache: bool = True,
         max_frames_num: Optional[int] = 32,
+        use_hf_video_processor: bool = True,
         retention_ratio: float = 0.25,
         scoring_method: str = "full",
         shallow_layers: int = 4,
@@ -969,6 +970,10 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         self.text_chunk_size = text_chunk_size
         self.attn_implementation = attn_implementation
         self.max_num_frames = max_frames_num
+        self.use_hf_video_processor = bool(use_hf_video_processor)
+        self._cache_identity = {
+            "use_hf_video_processor": self.use_hf_video_processor,
+        }
 
         eval_logger.info(
             "[LlavaOnevisionOursV3 / FETP-v3] "
@@ -979,7 +984,8 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             f"use_alpha={use_alpha}, "
             f"use_deviation={use_deviation}, "
             f"two_stage={two_stage}, "
-            f"text_chunk_size={text_chunk_size}"
+            f"text_chunk_size={text_chunk_size}, "
+            f"use_hf_video_processor={self.use_hf_video_processor}"
         )
 
         LlavaOnevisionModel.forward = _make_fetp_forward(
@@ -992,3 +998,8 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             two_stage=self.two_stage,
             text_chunk_size=text_chunk_size,
         )
+
+    def _prepare_chat_media_inputs(self, visuals, videos):
+        if self.use_hf_video_processor:
+            return visuals if visuals else None, videos if videos else None
+        return super()._prepare_chat_media_inputs(visuals, videos)

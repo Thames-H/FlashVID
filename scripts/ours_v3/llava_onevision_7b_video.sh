@@ -14,6 +14,7 @@ MAIN_PROCESS_PORT=18895
 BATCH_SIZE=1
 LOG_SAMPLES_SUFFIX="llava_onevision_ours_v3_7b_video"
 OUTPUT_PATH="./logs/ours_v3_llava_onevision_7b_video"
+CACHE_REQUESTS="true"
 TASKS=("videomme" "longvideobench_val_v")
 
 AUTODL_MODEL_PATH="$HOME/autodl-tmp/llava-onevision-qwen2-7b-ov-hf"
@@ -30,6 +31,7 @@ TWO_STAGE="false"
 TEXT_CHUNK_SIZE=32
 
 MAX_FRAMES_NUM=16
+USE_HF_VIDEO_PROCESSOR="true"
 ATTN_IMPLEMENTATION="flash_attention_2"
 DTYPE="float16"
 
@@ -41,7 +43,12 @@ export CUDA_VISIBLE_DEVICES
 export LMMS_EVAL_USE_CACHE
 export LMMS_EVAL_HOME
 
-BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_frames_num=$MAX_FRAMES_NUM,attn_implementation=$ATTN_IMPLEMENTATION,dtype=$DTYPE,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE"
+REQUEST_CACHE_ARGS=()
+if [[ -n "$CACHE_REQUESTS" ]]; then
+    REQUEST_CACHE_ARGS=(--cache_requests "$CACHE_REQUESTS")
+fi
+
+BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_frames_num=$MAX_FRAMES_NUM,use_hf_video_processor=$USE_HF_VIDEO_PROCESSOR,attn_implementation=$ATTN_IMPLEMENTATION,dtype=$DTYPE,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE"
 
 for retention_ratio in "${RETENTION_RATIOS[@]}"; do
     echo "Running LLaVA-OneVision-7B FETP-v3 video benchmarks with retention_ratio=${retention_ratio}"
@@ -56,6 +63,7 @@ for retention_ratio in "${RETENTION_RATIOS[@]}"; do
         --model_args "$MODEL_ARGS" \
         --tasks "$task" \
         --batch_size "$BATCH_SIZE" \
+        "${REQUEST_CACHE_ARGS[@]}" \
         --log_samples \
         --log_samples_suffix "$LOG_SAMPLES_SUFFIX" \
         --output_path "$OUTPUT_PATH"

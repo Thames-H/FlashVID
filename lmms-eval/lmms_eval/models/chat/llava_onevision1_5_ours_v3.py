@@ -16,6 +16,19 @@ from lmms_eval.api.registry import register_model
 from .llava_onevision1_5 import Llava_OneVision1_5 as LlavaOneVision1_5Chat
 
 
+def _patch_transformers_flash_attention_utils() -> None:
+    """Keep LLaVA-OneVision-1.5 remote code compatible with newer Transformers."""
+    flash_utils = importlib.import_module("transformers.modeling_flash_attention_utils")
+    if hasattr(flash_utils, "flash_attn_varlen_func"):
+        return
+
+    def flash_attn_varlen_func(*args, **kwargs):
+        (_, varlen_func, _, _), _ = flash_utils.lazy_import_flash_attention(None)
+        return varlen_func(*args, **kwargs)
+
+    flash_utils.flash_attn_varlen_func = flash_attn_varlen_func
+
+
 def _get_module_dtype(module) -> torch.dtype:
     for parameter in module.parameters():
         return parameter.dtype
@@ -778,6 +791,7 @@ class LlavaOneVision1_5OursV3(LlavaOneVision1_5Chat):
         text_chunk_size: Optional[int] = 32,
         **kwargs,
     ) -> None:
+        _patch_transformers_flash_attention_utils()
         super().__init__(*args, **kwargs)
 
         retention_ratio = float(retention_ratio)

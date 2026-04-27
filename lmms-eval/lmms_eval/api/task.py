@@ -412,12 +412,35 @@ class Task(abc.ABC):
         cache_key += f"-system_prompt_hash{utils.hash_string(system_instruction)}" if system_instruction is not None else ""
         cache_key += f"-tokenizer{tokenizer_name}"
 
+        def restore_serialized_callables(instances):
+            for instance in instances:
+                arguments = instance.arguments
+                if (
+                    len(arguments) >= 2
+                    and arguments[1] is None
+                    and hasattr(self, "doc_to_messages")
+                ):
+                    instance.arguments = (
+                        arguments[0],
+                        self.doc_to_messages,
+                        *arguments[2:],
+                    )
+                elif len(arguments) >= 3 and arguments[2] is None:
+                    instance.arguments = (
+                        arguments[0],
+                        arguments[1],
+                        self.doc_to_visual,
+                        *arguments[3:],
+                    )
+            return instances
+
         cached_instances = load_from_cache(file_name=cache_key)
 
         if cache_requests and cached_instances and not rewrite_requests_cache:
             cached_instances = cached_instances[:limit]
 
             flattened_instances = [instance for instance_group in cached_instances for instance in instance_group]
+            flattened_instances = restore_serialized_callables(flattened_instances)
 
             self._instances = flattened_instances
             return
@@ -475,14 +498,7 @@ class Task(abc.ABC):
         if cache_requests and (not cached_instances or rewrite_requests_cache):
             save_to_cache(file_name=cache_key, obj=instances)
 
-        # FIXME: Bo - We need to check if the doc_to_visual if it's exists and restore it. If we use cache, the doc_to_visual will be None since it's not serializable
-        for instance in self._instances:
-            if instance.arguments[2] is None:
-                arguments = (instance.arguments[0], instance.arguments[1], self.doc_to_visual, *instance.arguments[3:])
-            else:
-                arguments = instance.arguments
-
-            instance.arguments = arguments
+        restore_serialized_callables(self._instances)
 
     @abc.abstractmethod
     def construct_requests(self, doc_id, ctx, **kwargs):

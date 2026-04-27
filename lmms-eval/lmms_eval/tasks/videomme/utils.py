@@ -324,7 +324,38 @@ def videomme_process_results(doc, results):
         "videoID": doc["videoID"],
     }
 
-    return {"videomme_perception_score": data_dict}
+    metrics = {
+        "videomme_overall_score": data_dict,
+        # Keep the original metric key for existing VideoMME variants.
+        "videomme_perception_score": data_dict,
+    }
+    if doc["duration"] in VIDEO_TYPE:
+        metrics[f"videomme_{doc['duration']}_score"] = data_dict
+    return metrics
+
+
+def _videomme_score(results, duration=None):
+    selected_results = [result for result in results if duration is None or result["duration"] == duration]
+    if not selected_results:
+        return 0
+    total_correct = sum(result["score"] for result in selected_results)
+    return 100 * total_correct / len(selected_results)
+
+
+def videomme_aggregate_short_results(results):
+    return _videomme_score(results, "short")
+
+
+def videomme_aggregate_medium_results(results):
+    return _videomme_score(results, "medium")
+
+
+def videomme_aggregate_long_results(results):
+    return _videomme_score(results, "long")
+
+
+def videomme_aggregate_overall_results(results):
+    return _videomme_score(results)
 
 
 def videomme_aggregate_results(results):

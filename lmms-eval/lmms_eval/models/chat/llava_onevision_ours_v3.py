@@ -316,6 +316,94 @@ def _get_suffix_text_positions(
     return non_visual_positions[non_visual_positions > visual_positions[-1]]
 
 
+def _find_subsequence_positions(
+    sequence: torch.Tensor,
+    pattern: torch.Tensor,
+) -> Optional[torch.Tensor]:
+    if pattern.numel() == 0 or pattern.numel() > sequence.numel():
+        return None
+
+    sequence_cpu = sequence.detach().cpu()
+    pattern_cpu = pattern.detach().cpu()
+    for start in range(sequence.numel() - pattern.numel() + 1):
+        end = start + pattern.numel()
+        if torch.equal(sequence_cpu[start:end], pattern_cpu):
+            return torch.arange(start, end, device=sequence.device)
+    return None
+
+
+def _get_scoring_text_positions(
+    input_ids: torch.Tensor,
+    visual_positions: torch.Tensor,
+    config,
+    scoring_input_ids: Optional[torch.Tensor],
+) -> torch.Tensor:
+    fallback_positions = _get_suffix_text_positions(
+        input_ids,
+        visual_positions,
+        config,
+    )
+    if scoring_input_ids is None:
+        return fallback_positions
+
+    if scoring_input_ids.ndim > 1:
+        scoring_input_ids = scoring_input_ids[0]
+    scoring_input_ids = scoring_input_ids.to(input_ids.device).flatten()
+    visual_related_token_ids = torch.tensor(
+        [config.image_token_id, config.video_token_id],
+        device=input_ids.device,
+    )
+    scoring_input_ids = scoring_input_ids[
+        ~torch.isin(scoring_input_ids, visual_related_token_ids)
+    ]
+
+    max_trim = min(3, int(scoring_input_ids.numel()))
+    for left_trim in range(max_trim + 1):
+        for right_trim in range(max_trim + 1):
+            end = scoring_input_ids.numel() - right_trim
+            if end <= left_trim:
+                continue
+            candidate = scoring_input_ids[left_trim:end]
+            positions = _find_subsequence_positions(input_ids, candidate)
+            if positions is not None:
+                visual_mask = torch.isin(
+                    input_ids.index_select(0, positions),
+                    visual_related_token_ids,
+                )
+                positions = positions[~visual_mask]
+                if positions.numel() > 0:
+                    return positions
+
+    eval_logger.debug(
+        "FETP(LLaVA-OneVision): scoring text tokens were not found in the "
+        "full prompt; falling back to the prompt suffix."
+    )
+    return fallback_positions
+
+
+def _videomme_question_text(doc) -> str:
+    options = "\n".join(str(option) for option in doc.get("options", []))
+    return f"{doc.get('question', '')}\n{options}".strip()
+
+
+def _longvideobench_question_text(doc) -> str:
+    candidates = []
+    for i in range(5):
+        candidate = doc.get(f"option{i}")
+        if candidate and candidate != "N/A":
+            candidates.append(f"{chr(ord('A') + i)}. {candidate}")
+    return f"{doc.get('question', '')}\n" + "\n".join(candidates)
+
+
+def _benchmark_question_text(task: str, doc) -> Optional[str]:
+    task_name = str(task).lower()
+    if task_name.startswith("videomme"):
+        return _videomme_question_text(doc)
+    if task_name.startswith("longvideobench"):
+        return _longvideobench_question_text(doc).strip()
+    return None
+
+
 @torch.no_grad()
 def _diversity_prune(
     features: torch.Tensor,
@@ -569,6 +657,7 @@ def _make_fetp_forward(
         vision_aspect_ratio=None,
         batch_num_images=None,
         use_cache=None,
+        fetp_scoring_input_ids=None,
         **kwargs,
     ):
         vision_feature_layer = (
@@ -591,6 +680,8 @@ def _make_fetp_forward(
             if use_cache is not None
             else getattr(self.language_model.config, "use_cache", True)
         )
+        if fetp_scoring_input_ids is None:
+            fetp_scoring_input_ids = getattr(self, "_fetp_scoring_input_ids", None)
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
@@ -799,10 +890,11 @@ def _make_fetp_forward(
                                 extract_at = n_run + extract_at
                             extract_at = min(extract_at, n_run - 1)
 
-                        text_positions = _get_suffix_text_positions(
+                        text_positions = _get_scoring_text_positions(
                             input_ids[0],
                             visual_positions,
                             self.config,
+                            fetp_scoring_input_ids,
                         )
 
                         text_to_vis_logits, visual_value_states = _forward_extract(
@@ -935,6 +1027,7 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         use_deviation: bool = True,
         two_stage: bool = False,
         text_chunk_size: Optional[int] = 32,
+        scoring_text_mode: str = "full_prompt",
         **kwargs,
     ) -> None:
         super().__init__(
@@ -971,8 +1064,10 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         self.attn_implementation = attn_implementation
         self.max_num_frames = max_frames_num
         self.use_hf_video_processor = bool(use_hf_video_processor)
+        self.scoring_text_mode = str(scoring_text_mode)
         self._cache_identity = {
             "use_hf_video_processor": self.use_hf_video_processor,
+            "scoring_text_mode": self.scoring_text_mode,
         }
 
         eval_logger.info(
@@ -985,7 +1080,8 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             f"use_deviation={use_deviation}, "
             f"two_stage={two_stage}, "
             f"text_chunk_size={text_chunk_size}, "
-            f"use_hf_video_processor={self.use_hf_video_processor}"
+            f"use_hf_video_processor={self.use_hf_video_processor}, "
+            f"scoring_text_mode={self.scoring_text_mode}"
         )
 
         LlavaOnevisionModel.forward = _make_fetp_forward(
@@ -1003,3 +1099,52 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         if self.use_hf_video_processor:
             return visuals if visuals else None, videos if videos else None
         return super()._prepare_chat_media_inputs(visuals, videos)
+
+    def _set_fetp_scoring_input_ids(self, scoring_input_ids):
+        inner_model = getattr(self.model, "model", None)
+        if inner_model is not None:
+            setattr(inner_model, "_fetp_scoring_input_ids", scoring_input_ids)
+
+    def _prepare_generate_extra_kwargs(
+        self,
+        *,
+        task,
+        split,
+        doc_id,
+        doc,
+        prompt_text,
+        messages,
+        inputs,
+    ):
+        del split, doc_id, prompt_text, messages
+        self._set_fetp_scoring_input_ids(None)
+        if self.scoring_text_mode in ("", "full", "full_prompt", "suffix"):
+            return {}
+
+        if self.scoring_text_mode not in (
+            "benchmark_question",
+            "question",
+            "question_only",
+        ):
+            eval_logger.warning(
+                "FETP(LLaVA-OneVision): unknown scoring_text_mode="
+                f"{self.scoring_text_mode!r}; using the full prompt suffix."
+            )
+            return {}
+
+        scoring_text = _benchmark_question_text(task, doc)
+        if not scoring_text:
+            eval_logger.warning(
+                f"FETP(LLaVA-OneVision): no benchmark-specific scoring text "
+                f"for task={task}; using the full prompt suffix."
+            )
+            return {}
+
+        scoring_text = f"\n{scoring_text.strip()}\n"
+        scoring_input_ids = self.tokenizer(
+            scoring_text,
+            add_special_tokens=False,
+            return_tensors="pt",
+        ).input_ids.to(inputs["input_ids"].device)
+        self._set_fetp_scoring_input_ids(scoring_input_ids)
+        return {}

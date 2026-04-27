@@ -80,6 +80,20 @@ class LlavaHf(LlavaHfSimple):
             prepared_videos = [self.load_video(videos, self.max_frames_num)]
         return prepared_visuals, prepared_videos
 
+    def _prepare_generate_extra_kwargs(
+        self,
+        *,
+        task,
+        split,
+        doc_id,
+        doc,
+        prompt_text,
+        messages,
+        inputs,
+    ):
+        del task, split, doc_id, doc, prompt_text, messages, inputs
+        return {}
+
     def generate_until(self, requests: List[Instance]) -> List[str]:
         original_requests = list(requests)
         cached_responses, pending_requests = self.split_requests_by_cache(
@@ -120,7 +134,8 @@ class LlavaHf(LlavaHfSimple):
             )
             task = task[0]
             split = split[0]
-            chat_messages = [doc_to_messages[0](self.task_dict[task][split][ids]) for ids in doc_id]
+            docs = [self.task_dict[task][split][ids] for ids in doc_id]
+            chat_messages = [doc_to_messages[0](doc) for doc in docs]
             chat_messages: List[ChatMessages] = [ChatMessages(**{"messages": message}) for message in chat_messages]
             visuals = []
             videos = []
@@ -168,6 +183,15 @@ class LlavaHf(LlavaHfSimple):
                     **videos_kwargs,
                 )
             )
+            extra_generate_kwargs = self._prepare_generate_extra_kwargs(
+                task=task,
+                split=split,
+                doc_id=doc_id[0],
+                doc=docs[0],
+                prompt_text=text,
+                messages=messages,
+                inputs=inputs,
+            )
 
             # we assume all gen kwargs in the batch are the same
             # this is safe to assume because the `grouper` object ensures it.
@@ -187,6 +211,7 @@ class LlavaHf(LlavaHfSimple):
                 start_time = time.time()
                 cont = self.model.generate(
                     **inputs,
+                    **extra_generate_kwargs,
                     do_sample=do_sample,
                     temperature=gen_kwargs["temperature"] if do_sample else None,
                     top_p=gen_kwargs["top_p"],

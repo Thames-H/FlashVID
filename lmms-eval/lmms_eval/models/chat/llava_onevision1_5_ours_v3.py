@@ -13,6 +13,11 @@ from transformers.utils import is_torchdynamo_compiling
 from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 
+from .fetp_pruning_policies import (
+    infer_tokens_per_frame,
+    select_pruning_indices,
+    uniform_prune,
+)
 from .llava_onevision1_5 import Llava_OneVision1_5 as LlavaOneVision1_5Chat
 
 
@@ -384,6 +389,11 @@ def _make_fetp_forward(
     use_deviation: bool = True,
     two_stage: bool = False,
     text_chunk_size: Optional[int] = 32,
+    pruning_policy: str = "topk",
+    min_keep_per_frame: int = 1,
+    gap_percentile: float = 0.8,
+    temporal_ratio: float = 0.5,
+    tokens_per_frame: Optional[int] = None,
 ):
     def patched_forward(
         self,
@@ -645,22 +655,42 @@ def _make_fetp_forward(
                                 use_deviation=use_deviation,
                                 text_chunk_size=text_chunk_size,
                             )
-                            _, top_indices = scores.topk(num_keep)
-                            keep_visual_local = top_indices.sort().values
+                            policy_tokens_per_frame = None
+                            if n_visual_tokens == original_n_visual_tokens:
+                                policy_tokens_per_frame = infer_tokens_per_frame(
+                                    n_visual_tokens,
+                                    configured_tokens_per_frame=tokens_per_frame,
+                                    video_grid_thw=(
+                                        video_grid_thw
+                                        if n_video_tokens is not None
+                                        else None
+                                    ),
+                                    pixel_values_videos=(
+                                        pixel_values_videos
+                                        if n_video_tokens is not None
+                                        else None
+                                    ),
+                                )
+                            keep_visual_local, _selection_stats = (
+                                select_pruning_indices(
+                                    scores,
+                                    num_keep,
+                                    pruning_policy=pruning_policy,
+                                    tokens_per_frame=policy_tokens_per_frame,
+                                    min_keep_per_frame=min_keep_per_frame,
+                                    gap_percentile=gap_percentile,
+                                    temporal_ratio=temporal_ratio,
+                                )
+                            )
                         else:
                             eval_logger.warning(
                                 "FETP(LLaVA-OneVision-1.5): attention extraction "
                                 "failed, falling back to uniform selection."
                             )
-                            step = n_visual_tokens / num_keep
-                            keep_visual_local = (
-                                torch.arange(
-                                    num_keep,
-                                    device=inputs_embeds.device,
-                                )
-                                .float()
-                                .mul(step)
-                                .long()
+                            keep_visual_local = uniform_prune(
+                                n_visual_tokens,
+                                num_keep,
+                                device=inputs_embeds.device,
                             )
 
                         non_visual_positions = torch.where(
@@ -750,6 +780,11 @@ def _patch_llava_onevision1_5_model(
     use_deviation: bool,
     two_stage: bool,
     text_chunk_size: Optional[int],
+    pruning_policy: str,
+    min_keep_per_frame: int,
+    gap_percentile: float,
+    temporal_ratio: float,
+    tokens_per_frame: Optional[int],
 ) -> None:
     inner_model = getattr(model, "model", None)
     if inner_model is None or not hasattr(inner_model, "language_model"):
@@ -771,6 +806,11 @@ def _patch_llava_onevision1_5_model(
         use_deviation=use_deviation,
         two_stage=two_stage,
         text_chunk_size=text_chunk_size,
+        pruning_policy=pruning_policy,
+        min_keep_per_frame=min_keep_per_frame,
+        gap_percentile=gap_percentile,
+        temporal_ratio=temporal_ratio,
+        tokens_per_frame=tokens_per_frame,
     )
 
 
@@ -789,6 +829,11 @@ class LlavaOneVision1_5OursV3(LlavaOneVision1_5Chat):
         use_deviation: bool = True,
         two_stage: bool = False,
         text_chunk_size: Optional[int] = 32,
+        pruning_policy: str = "topk",
+        min_keep_per_frame: int = 1,
+        gap_percentile: float = 0.8,
+        temporal_ratio: float = 0.5,
+        tokens_per_frame: Optional[int] = None,
         **kwargs,
     ) -> None:
         _patch_transformers_flash_attention_utils()
@@ -801,6 +846,12 @@ class LlavaOneVision1_5OursV3(LlavaOneVision1_5Chat):
         text_chunk_size = (
             None if text_chunk_size is None else int(text_chunk_size)
         )
+        min_keep_per_frame = int(min_keep_per_frame)
+        gap_percentile = float(gap_percentile)
+        temporal_ratio = float(temporal_ratio)
+        tokens_per_frame = (
+            None if tokens_per_frame in (None, "", 0, "0") else int(tokens_per_frame)
+        )
 
         self.retention_ratio = retention_ratio
         self.scoring_method = scoring_method
@@ -810,6 +861,11 @@ class LlavaOneVision1_5OursV3(LlavaOneVision1_5Chat):
         self.use_deviation = bool(use_deviation)
         self.two_stage = bool(two_stage)
         self.text_chunk_size = text_chunk_size
+        self.pruning_policy = str(pruning_policy)
+        self.min_keep_per_frame = min_keep_per_frame
+        self.gap_percentile = gap_percentile
+        self.temporal_ratio = temporal_ratio
+        self.tokens_per_frame = tokens_per_frame
 
         eval_logger.info(
             "[LlavaOneVision1_5OursV3 / FETP-v3] "
@@ -820,7 +876,12 @@ class LlavaOneVision1_5OursV3(LlavaOneVision1_5Chat):
             f"use_alpha={use_alpha}, "
             f"use_deviation={use_deviation}, "
             f"two_stage={two_stage}, "
-            f"text_chunk_size={text_chunk_size}"
+            f"text_chunk_size={text_chunk_size}, "
+            f"pruning_policy={self.pruning_policy}, "
+            f"min_keep_per_frame={self.min_keep_per_frame}, "
+            f"gap_percentile={self.gap_percentile}, "
+            f"temporal_ratio={self.temporal_ratio}, "
+            f"tokens_per_frame={self.tokens_per_frame}"
         )
 
         _patch_llava_onevision1_5_model(
@@ -833,6 +894,11 @@ class LlavaOneVision1_5OursV3(LlavaOneVision1_5Chat):
             use_deviation=self.use_deviation,
             two_stage=self.two_stage,
             text_chunk_size=text_chunk_size,
+            pruning_policy=self.pruning_policy,
+            min_keep_per_frame=self.min_keep_per_frame,
+            gap_percentile=self.gap_percentile,
+            temporal_ratio=self.temporal_ratio,
+            tokens_per_frame=self.tokens_per_frame,
         )
 
     def generate_until(self, requests: List[Instance]) -> List[str]:

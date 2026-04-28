@@ -32,6 +32,8 @@ from lmms_eval.models.chat.internvl_hf import (
 from lmms_eval.models.model_utils.gen_metrics import log_metrics
 from lmms_eval.protocol import ChatMessages
 
+from .fetp_pruning_policies import select_pruning_indices
+
 warnings.filterwarnings("ignore")
 
 
@@ -506,6 +508,11 @@ def _make_fetp_forward(
     use_deviation: bool = True,
     two_stage: bool = False,
     text_chunk_size: Optional[int] = 32,
+    pruning_policy: str = "topk",
+    min_keep_per_frame: int = 1,
+    gap_percentile: float = 0.8,
+    temporal_ratio: float = 0.5,
+    tokens_per_frame: Optional[int] = None,
 ):
     def patched_forward(
         self: InternVLModel,
@@ -669,8 +676,16 @@ def _make_fetp_forward(
                                 text_chunk_size=text_chunk_size,
                             )
                         )
-                        keep_within_candidate = (
-                            final_scores.topk(num_keep).indices.sort().values
+                        keep_within_candidate, selection_stats = (
+                            select_pruning_indices(
+                                final_scores,
+                                num_keep,
+                                pruning_policy=pruning_policy,
+                                tokens_per_frame=None,
+                                min_keep_per_frame=min_keep_per_frame,
+                                gap_percentile=gap_percentile,
+                                temporal_ratio=temporal_ratio,
+                            )
                         )
                         keep_visual_positions = visual_positions.index_select(
                             0,
@@ -746,8 +761,22 @@ def _make_fetp_forward(
                                 text_chunk_size=text_chunk_size,
                             )
                         )
-                        keep_within_candidate = (
-                            final_scores.topk(num_keep).indices.sort().values
+                        policy_tokens_per_frame = (
+                            tokens_per_frame
+                            if candidate_visual_positions.numel()
+                            == visual_positions.numel()
+                            else None
+                        )
+                        keep_within_candidate, selection_stats = (
+                            select_pruning_indices(
+                                final_scores,
+                                num_keep,
+                                pruning_policy=pruning_policy,
+                                tokens_per_frame=policy_tokens_per_frame,
+                                min_keep_per_frame=min_keep_per_frame,
+                                gap_percentile=gap_percentile,
+                                temporal_ratio=temporal_ratio,
+                            )
                         )
                         keep_visual_positions = candidate_visual_positions.index_select(
                             0,
@@ -790,13 +819,14 @@ def _make_fetp_forward(
                         scoring_method=resolved_scoring_method,
                         anchor_layers=(extract_at,),
                         num_visual_tokens=original_num_visual_tokens,
-                        num_keep=num_keep,
+                        num_keep=int(keep_visual_positions.numel()),
                         scoring_time_s=scoring_time_s,
                         total_pruning_time_s=time.perf_counter() - total_pruning_start,
                         candidate_size=candidate_size,
                         score_query_tokens=score_query_tokens,
                         score_heads=score_heads,
                     )
+                    self._fetp_last_pruning_stats.update(selection_stats)
                     self._fetp_last_pruning_stats["pruning_two_stage"] = bool(two_stage)
                     if num_visual_tokens_after_stage1 is not None:
                         self._fetp_last_pruning_stats["pruning_num_visual_tokens_after_stage1"] = int(
@@ -868,6 +898,11 @@ class InternVL3_5_Ours_V3(InternVLHf):
         use_deviation: bool = True,
         two_stage: bool = False,
         text_chunk_size: Optional[int] = 32,
+        pruning_policy: str = "topk",
+        min_keep_per_frame: int = 1,
+        gap_percentile: float = 0.8,
+        temporal_ratio: float = 0.5,
+        tokens_per_frame: Optional[int] = None,
         profile_reference_scoring: bool = False,
         reference_scoring_method: str = "shallow",
         **kwargs,
@@ -877,6 +912,13 @@ class InternVL3_5_Ours_V3(InternVLHf):
         del reference_scoring_method
 
         super().__init__(pretrained=pretrained, **kwargs)
+
+        min_keep_per_frame = int(min_keep_per_frame)
+        gap_percentile = float(gap_percentile)
+        temporal_ratio = float(temporal_ratio)
+        tokens_per_frame = (
+            None if tokens_per_frame in (None, "", 0, "0") else int(tokens_per_frame)
+        )
 
         self.retention_ratio = retention_ratio
         self.scoring_method = scoring_method
@@ -889,6 +931,11 @@ class InternVL3_5_Ours_V3(InternVLHf):
         self.max_score_text_tokens = max_score_text_tokens
         self.max_score_heads = max_score_heads
         self.text_chunk_size = text_chunk_size
+        self.pruning_policy = str(pruning_policy)
+        self.min_keep_per_frame = min_keep_per_frame
+        self.gap_percentile = gap_percentile
+        self.temporal_ratio = temporal_ratio
+        self.tokens_per_frame = tokens_per_frame
         self._cache_identity = {
             "retention_ratio": retention_ratio,
             "scoring_method": scoring_method,
@@ -902,6 +949,11 @@ class InternVL3_5_Ours_V3(InternVLHf):
             "max_score_text_tokens": max_score_text_tokens,
             "max_score_heads": max_score_heads,
             "text_chunk_size": text_chunk_size,
+            "pruning_policy": self.pruning_policy,
+            "min_keep_per_frame": self.min_keep_per_frame,
+            "gap_percentile": self.gap_percentile,
+            "temporal_ratio": self.temporal_ratio,
+            "tokens_per_frame": self.tokens_per_frame,
         }
         eval_logger.info(
             "[InternVL3_5_Ours_V3 / FETP] "
@@ -913,7 +965,12 @@ class InternVL3_5_Ours_V3(InternVLHf):
             f"candidate_ratio={candidate_ratio}, "
             f"max_score_text_tokens={max_score_text_tokens}, "
             f"max_score_heads={max_score_heads}, "
-            f"text_chunk_size={text_chunk_size}"
+            f"text_chunk_size={text_chunk_size}, "
+            f"pruning_policy={self.pruning_policy}, "
+            f"min_keep_per_frame={self.min_keep_per_frame}, "
+            f"gap_percentile={self.gap_percentile}, "
+            f"temporal_ratio={self.temporal_ratio}, "
+            f"tokens_per_frame={self.tokens_per_frame}"
         )
 
         InternVLModel.forward = _make_fetp_forward(
@@ -929,6 +986,11 @@ class InternVL3_5_Ours_V3(InternVLHf):
             use_deviation=use_deviation,
             two_stage=two_stage,
             text_chunk_size=text_chunk_size,
+            pruning_policy=self.pruning_policy,
+            min_keep_per_frame=self.min_keep_per_frame,
+            gap_percentile=self.gap_percentile,
+            temporal_ratio=self.temporal_ratio,
+            tokens_per_frame=self.tokens_per_frame,
         )
 
     def generate_until(self, requests: List[Instance]) -> List[str]:

@@ -45,6 +45,11 @@ from .qwen3_vl_ours_v2 import (
     _slice_position_embeddings,
     _unpack_visual_outputs,
 )
+from .fetp_pruning_policies import (
+    infer_tokens_per_frame,
+    select_pruning_indices,
+    uniform_prune,
+)
 
 process_vision_info, _has_qwen_vl = optional_import(
     "qwen_vl_utils", "process_vision_info"
@@ -502,6 +507,11 @@ def _make_fetp_forward(
     use_deviation: bool = True,
     two_stage: bool = False,
     text_chunk_size: Optional[int] = 32,
+    pruning_policy: str = "topk",
+    min_keep_per_frame: int = 1,
+    gap_percentile: float = 0.8,
+    temporal_ratio: float = 0.5,
+    tokens_per_frame: Optional[int] = None,
 ):
     def patched_forward(
         self: Qwen3VLModel,
@@ -797,6 +807,32 @@ def _make_fetp_forward(
                             text_chunk_size=text_chunk_size,
                         )
                     )
+                    policy_tokens_per_frame = None
+                    if n_visual_tokens_after_stage1 is None:
+                        policy_tokens_per_frame = infer_tokens_per_frame(
+                            n_visual_tokens,
+                            configured_tokens_per_frame=tokens_per_frame,
+                            video_grid_thw=(
+                                video_grid_thw
+                                if n_video_tokens is not None
+                                else None
+                            ),
+                            pixel_values_videos=(
+                                pixel_values_videos
+                                if n_video_tokens is not None
+                                else None
+                            ),
+                        )
+                    keep_visual_local, selection_stats = select_pruning_indices(
+                        scores,
+                        num_keep,
+                        pruning_policy=pruning_policy,
+                        tokens_per_frame=policy_tokens_per_frame,
+                        min_keep_per_frame=min_keep_per_frame,
+                        gap_percentile=gap_percentile,
+                        temporal_ratio=temporal_ratio,
+                    )
+                    effective_num_keep = int(keep_visual_local.numel())
                     _fes_distribution_stats.append(
                         {
                             "sample_index": len(_fes_distribution_stats),
@@ -806,26 +842,31 @@ def _make_fetp_forward(
                             ),
                             "n_visual_tokens": int(n_visual_tokens),
                             "num_keep": int(num_keep),
-                            "n_visual_tokens_used": int(num_keep),
+                            "n_visual_tokens_used": effective_num_keep,
                             "alpha": _tensor_summary(alpha_mean),
                             "deviation": _tensor_summary(deviation_mean),
                             "score": _tensor_summary(scores),
+                            **selection_stats,
                         }
                     )
-                    keep_visual_local = scores.topk(num_keep).indices.sort().values
                     score_heads = int(text_to_vis_logits.shape[1])
                 else:
                     eval_logger.warning(
                         "FETP(Qwen3-VL/V3): attention extraction failed, "
                         "falling back to uniform selection."
                     )
-                    step = n_visual_tokens / num_keep
-                    keep_visual_local = (
-                        torch.arange(num_keep, device=inputs_embeds.device)
-                        .float()
-                        .mul(step)
-                        .long()
+                    keep_visual_local = uniform_prune(
+                        n_visual_tokens,
+                        num_keep,
+                        device=inputs_embeds.device,
                     )
+                    effective_num_keep = int(keep_visual_local.numel())
+                    selection_stats = {
+                        "pruning_policy": "uniform_fallback",
+                        "pruning_policy_requested": pruning_policy,
+                        "pruning_max_keep_budget": int(num_keep),
+                        "pruning_effective_keep": effective_num_keep,
+                    }
                     _fes_distribution_stats.append(
                         {
                             "sample_index": len(_fes_distribution_stats),
@@ -835,8 +876,9 @@ def _make_fetp_forward(
                             ),
                             "n_visual_tokens": int(n_visual_tokens),
                             "num_keep": int(num_keep),
-                            "n_visual_tokens_used": int(num_keep),
+                            "n_visual_tokens_used": effective_num_keep,
                             "fallback": True,
+                            **selection_stats,
                         }
                     )
                     score_heads = self.language_model.config.num_attention_heads
@@ -883,13 +925,14 @@ def _make_fetp_forward(
                     scoring_method=resolved_scoring_method,
                     anchor_layers=(extract_at,),
                     num_visual_tokens=original_n_visual_tokens,
-                    num_keep=num_keep,
+                    num_keep=effective_num_keep,
                     scoring_time_s=scoring_time_s,
                     total_pruning_time_s=time.perf_counter() - total_pruning_start,
                     candidate_size=int(n_visual_tokens),
                     score_query_tokens=int(text_positions.numel()),
                     score_heads=score_heads,
                 )
+                self._fetp_last_pruning_stats.update(selection_stats)
                 self._fetp_last_pruning_stats["pruning_two_stage"] = bool(
                     two_stage
                 )
@@ -899,6 +942,8 @@ def _make_fetp_forward(
                     f"scoring_method={resolved_scoring_method}, "
                     f"target_layer={extract_at}, "
                     f"two_stage={two_stage}, "
+                    f"pruning_policy={selection_stats.get('pruning_policy')}, "
+                    f"effective_keep={effective_num_keep}, "
                     f"pruning_ms="
                     f"{self._fetp_last_pruning_stats['pruning_total_time_ms']:.2f}"
                 )
@@ -945,6 +990,11 @@ def _make_fetp_anchor_forward(
     reference_scoring_method: str = "shallow",
     two_stage: bool = False,
     text_chunk_size: Optional[int] = 32,
+    pruning_policy: str = "topk",
+    min_keep_per_frame: int = 1,
+    gap_percentile: float = 0.8,
+    temporal_ratio: float = 0.5,
+    tokens_per_frame: Optional[int] = None,
 ):
     """Backward-compatible wrapper for the older anchor-layer API."""
     del anchor_weights
@@ -972,6 +1022,11 @@ def _make_fetp_anchor_forward(
         use_deviation=use_deviation,
         two_stage=two_stage,
         text_chunk_size=text_chunk_size,
+        pruning_policy=pruning_policy,
+        min_keep_per_frame=min_keep_per_frame,
+        gap_percentile=gap_percentile,
+        temporal_ratio=temporal_ratio,
+        tokens_per_frame=tokens_per_frame,
     )
 
 
@@ -1010,6 +1065,11 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
         two_stage: bool = False,
         text_chunk_size: Optional[int] = 32,
         stats_output_path: Optional[str] = None,
+        pruning_policy: str = "topk",
+        min_keep_per_frame: int = 1,
+        gap_percentile: float = 0.8,
+        temporal_ratio: float = 0.5,
+        tokens_per_frame: Optional[int] = None,
         # Backward-compatible legacy v3 arguments.
         anchor_layers: Optional[Union[str, Sequence[int]]] = None,
         anchor_weights: Optional[Union[str, Sequence[float]]] = None,
@@ -1021,6 +1081,13 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
         **kwargs,
     ) -> None:
         assert kwargs == {}, f"Unexpected kwargs: {kwargs}"
+
+        min_keep_per_frame = int(min_keep_per_frame)
+        gap_percentile = float(gap_percentile)
+        temporal_ratio = float(temporal_ratio)
+        tokens_per_frame = (
+            None if tokens_per_frame in (None, "", 0, "0") else int(tokens_per_frame)
+        )
 
         super().__init__(
             pretrained=pretrained,
@@ -1050,6 +1117,11 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
         self.two_stage = two_stage
         self.text_chunk_size = text_chunk_size
         self.stats_output_path = stats_output_path
+        self.pruning_policy = pruning_policy
+        self.min_keep_per_frame = min_keep_per_frame
+        self.gap_percentile = gap_percentile
+        self.temporal_ratio = temporal_ratio
+        self.tokens_per_frame = tokens_per_frame
         self._cache_identity = {
             "retention_ratio": retention_ratio,
             "scoring_method": scoring_method,
@@ -1063,6 +1135,11 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             "max_score_text_tokens": max_score_text_tokens,
             "max_score_heads": max_score_heads,
             "reference_scoring_method": reference_scoring_method,
+            "pruning_policy": pruning_policy,
+            "min_keep_per_frame": min_keep_per_frame,
+            "gap_percentile": gap_percentile,
+            "temporal_ratio": temporal_ratio,
+            "tokens_per_frame": tokens_per_frame,
         }
 
         if scoring_method == "anchor":
@@ -1087,6 +1164,11 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 reference_scoring_method=reference_scoring_method,
                 two_stage=two_stage,
                 text_chunk_size=text_chunk_size,
+                pruning_policy=pruning_policy,
+                min_keep_per_frame=min_keep_per_frame,
+                gap_percentile=gap_percentile,
+                temporal_ratio=temporal_ratio,
+                tokens_per_frame=tokens_per_frame,
             )
         else:
             Qwen3VLModel.forward = _make_fetp_forward(
@@ -1098,6 +1180,11 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 use_deviation=use_deviation,
                 two_stage=two_stage,
                 text_chunk_size=text_chunk_size,
+                pruning_policy=pruning_policy,
+                min_keep_per_frame=min_keep_per_frame,
+                gap_percentile=gap_percentile,
+                temporal_ratio=temporal_ratio,
+                tokens_per_frame=tokens_per_frame,
             )
 
         eval_logger.info(
@@ -1108,7 +1195,12 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             f"target_layer={target_layer}, "
             f"two_stage={two_stage}, "
             f"text_chunk_size={text_chunk_size}, "
-            f"stats_output_path={stats_output_path}"
+            f"stats_output_path={stats_output_path}, "
+            f"pruning_policy={pruning_policy}, "
+            f"min_keep_per_frame={min_keep_per_frame}, "
+            f"gap_percentile={gap_percentile}, "
+            f"temporal_ratio={temporal_ratio}, "
+            f"tokens_per_frame={tokens_per_frame}"
         )
 
     def generate_until(self, requests: List[Instance]) -> List[str]:

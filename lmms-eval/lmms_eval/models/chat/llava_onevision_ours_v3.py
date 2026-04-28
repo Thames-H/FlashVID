@@ -23,6 +23,11 @@ from transformers.models.qwen2.modeling_qwen2 import (
 from lmms_eval.api.registry import register_model
 
 from .llava_hf import LlavaHf as LlavaHfChat
+from .fetp_pruning_policies import (
+    infer_tokens_per_frame,
+    select_pruning_indices,
+    uniform_prune,
+)
 
 
 def _call_mask_fn(
@@ -653,6 +658,11 @@ def _make_fetp_forward(
     use_deviation: bool = True,
     two_stage: bool = False,
     text_chunk_size: Optional[int] = 32,
+    pruning_policy: str = "topk",
+    min_keep_per_frame: int = 1,
+    gap_percentile: float = 0.8,
+    temporal_ratio: float = 0.5,
+    tokens_per_frame: Optional[int] = None,
 ):
     def patched_forward(
         self,
@@ -932,22 +942,37 @@ def _make_fetp_forward(
                                 use_deviation=use_deviation,
                                 text_chunk_size=text_chunk_size,
                             )
-                            _, top_indices = scores.topk(num_keep)
-                            keep_visual_local = top_indices.sort().values
+                            policy_tokens_per_frame = None
+                            if n_visual_tokens == original_n_visual_tokens:
+                                policy_tokens_per_frame = infer_tokens_per_frame(
+                                    n_visual_tokens,
+                                    configured_tokens_per_frame=tokens_per_frame,
+                                    pixel_values_videos=(
+                                        pixel_values_videos
+                                        if n_video_tokens is not None
+                                        else None
+                                    ),
+                                )
+                            keep_visual_local, _selection_stats = (
+                                select_pruning_indices(
+                                    scores,
+                                    num_keep,
+                                    pruning_policy=pruning_policy,
+                                    tokens_per_frame=policy_tokens_per_frame,
+                                    min_keep_per_frame=min_keep_per_frame,
+                                    gap_percentile=gap_percentile,
+                                    temporal_ratio=temporal_ratio,
+                                )
+                            )
                         else:
                             eval_logger.warning(
                                 "FETP(LLaVA-OneVision): attention extraction "
                                 "failed, falling back to uniform selection."
                             )
-                            step = n_visual_tokens / num_keep
-                            keep_visual_local = (
-                                torch.arange(
-                                    num_keep,
-                                    device=inputs_embeds.device,
-                                )
-                                .float()
-                                .mul(step)
-                                .long()
+                            keep_visual_local = uniform_prune(
+                                n_visual_tokens,
+                                num_keep,
+                                device=inputs_embeds.device,
                             )
 
                         non_visual_positions = torch.where(
@@ -1041,6 +1066,11 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         two_stage: bool = False,
         text_chunk_size: Optional[int] = 32,
         scoring_text_mode: str = "full_prompt",
+        pruning_policy: str = "topk",
+        min_keep_per_frame: int = 1,
+        gap_percentile: float = 0.8,
+        temporal_ratio: float = 0.5,
+        tokens_per_frame: Optional[int] = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -1065,6 +1095,12 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         text_chunk_size = (
             None if text_chunk_size is None else int(text_chunk_size)
         )
+        min_keep_per_frame = int(min_keep_per_frame)
+        gap_percentile = float(gap_percentile)
+        temporal_ratio = float(temporal_ratio)
+        tokens_per_frame = (
+            None if tokens_per_frame in (None, "", 0, "0") else int(tokens_per_frame)
+        )
 
         self.retention_ratio = retention_ratio
         self.scoring_method = scoring_method
@@ -1078,9 +1114,19 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         self.max_num_frames = max_frames_num
         self.use_hf_video_processor = bool(use_hf_video_processor)
         self.scoring_text_mode = str(scoring_text_mode)
+        self.pruning_policy = str(pruning_policy)
+        self.min_keep_per_frame = min_keep_per_frame
+        self.gap_percentile = gap_percentile
+        self.temporal_ratio = temporal_ratio
+        self.tokens_per_frame = tokens_per_frame
         self._cache_identity = {
             "use_hf_video_processor": self.use_hf_video_processor,
             "scoring_text_mode": self.scoring_text_mode,
+            "pruning_policy": self.pruning_policy,
+            "min_keep_per_frame": self.min_keep_per_frame,
+            "gap_percentile": self.gap_percentile,
+            "temporal_ratio": self.temporal_ratio,
+            "tokens_per_frame": self.tokens_per_frame,
         }
 
         eval_logger.info(
@@ -1094,7 +1140,12 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             f"two_stage={two_stage}, "
             f"text_chunk_size={text_chunk_size}, "
             f"use_hf_video_processor={self.use_hf_video_processor}, "
-            f"scoring_text_mode={self.scoring_text_mode}"
+            f"scoring_text_mode={self.scoring_text_mode}, "
+            f"pruning_policy={self.pruning_policy}, "
+            f"min_keep_per_frame={self.min_keep_per_frame}, "
+            f"gap_percentile={self.gap_percentile}, "
+            f"temporal_ratio={self.temporal_ratio}, "
+            f"tokens_per_frame={self.tokens_per_frame}"
         )
 
         LlavaOnevisionModel.forward = _make_fetp_forward(
@@ -1106,6 +1157,11 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             use_deviation=self.use_deviation,
             two_stage=self.two_stage,
             text_chunk_size=text_chunk_size,
+            pruning_policy=self.pruning_policy,
+            min_keep_per_frame=self.min_keep_per_frame,
+            gap_percentile=self.gap_percentile,
+            temporal_ratio=self.temporal_ratio,
+            tokens_per_frame=self.tokens_per_frame,
         )
 
     def _prepare_chat_media_inputs(self, visuals, videos):

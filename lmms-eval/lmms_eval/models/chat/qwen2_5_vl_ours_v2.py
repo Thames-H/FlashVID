@@ -48,6 +48,12 @@ from lmms_eval.models.model_utils.reasoning_model_utils import (
 from lmms_eval.models.simple.qwen2_5_vl import Qwen2_5_VL as Qwen2_5_VLSimple
 from lmms_eval.protocol import ChatMessages
 
+from .fetp_pruning_policies import (
+    infer_tokens_per_frame,
+    select_pruning_indices,
+    uniform_prune,
+)
+
 process_vision_info, _has_qwen_vl = optional_import(
     "qwen_vl_utils", "process_vision_info"
 )
@@ -295,6 +301,11 @@ def _make_fetp_forward(
     target_layer: int,
     use_alpha: bool = True,
     use_deviation: bool = True,
+    pruning_policy: str = "topk",
+    min_keep_per_frame: int = 1,
+    gap_percentile: float = 0.8,
+    temporal_ratio: float = 0.5,
+    tokens_per_frame: Optional[int] = None,
 ):
     """Create a patched Qwen2_5_VLModel.forward with FES-based pruning."""
 
@@ -482,19 +493,37 @@ def _make_fetp_forward(
                     use_deviation=use_deviation,
                 )  # [n_visual_tokens]
 
-                # -- Select top-k tokens by score --
-                _, top_indices = scores.topk(num_keep)
-                keep_visual_local = top_indices.sort().values
+                # -- Select tokens using the configured pruning policy --
+                policy_tokens_per_frame = infer_tokens_per_frame(
+                    n_visual_tokens,
+                    configured_tokens_per_frame=tokens_per_frame,
+                    video_grid_thw=(
+                        video_grid_thw if n_video_tokens is not None else None
+                    ),
+                    pixel_values_videos=(
+                        pixel_values_videos if n_video_tokens is not None else None
+                    ),
+                )
+                keep_visual_local, _selection_stats = select_pruning_indices(
+                    scores,
+                    num_keep,
+                    pruning_policy=pruning_policy,
+                    tokens_per_frame=policy_tokens_per_frame,
+                    min_keep_per_frame=min_keep_per_frame,
+                    gap_percentile=gap_percentile,
+                    temporal_ratio=temporal_ratio,
+                )
             else:
                 # Fallback: uniform selection.
                 eval_logger.warning(
                     "FETP: attention extraction failed, "
                     "falling back to uniform selection."
                 )
-                step = n_visual_tokens / num_keep
-                keep_visual_local = torch.arange(
-                    num_keep, device=device
-                ).float().mul(step).long()
+                keep_visual_local = uniform_prune(
+                    n_visual_tokens,
+                    num_keep,
+                    device=device,
+                )
 
             # -- Build global keep indices: prefix + kept visual + suffix --
             global_indices = torch.arange(total_seq, device=device)
@@ -588,8 +617,20 @@ class Qwen2_5_VL_Ours_V2(Qwen2_5_VLSimple):
         target_layer: int = 15,
         use_alpha: bool = True,
         use_deviation: bool = True,
+        pruning_policy: str = "topk",
+        min_keep_per_frame: int = 1,
+        gap_percentile: float = 0.8,
+        temporal_ratio: float = 0.5,
+        tokens_per_frame: Optional[int] = None,
         **kwargs,
     ) -> None:
+        min_keep_per_frame = int(min_keep_per_frame)
+        gap_percentile = float(gap_percentile)
+        temporal_ratio = float(temporal_ratio)
+        tokens_per_frame = (
+            None if tokens_per_frame in (None, "", 0, "0") else int(tokens_per_frame)
+        )
+
         super().__init__(
             pretrained=pretrained,
             device=device,
@@ -617,7 +658,12 @@ class Qwen2_5_VL_Ours_V2(Qwen2_5_VLSimple):
             f"shallow_layers={shallow_layers}, "
             f"target_layer={target_layer}, "
             f"use_alpha={use_alpha}, "
-            f"use_deviation={use_deviation}"
+            f"use_deviation={use_deviation}, "
+            f"pruning_policy={pruning_policy}, "
+            f"min_keep_per_frame={min_keep_per_frame}, "
+            f"gap_percentile={gap_percentile}, "
+            f"temporal_ratio={temporal_ratio}, "
+            f"tokens_per_frame={tokens_per_frame}"
         )
 
         # Monkey-patch the model's forward.
@@ -630,6 +676,11 @@ class Qwen2_5_VL_Ours_V2(Qwen2_5_VLSimple):
             target_layer=target_layer,
             use_alpha=use_alpha,
             use_deviation=use_deviation,
+            pruning_policy=pruning_policy,
+            min_keep_per_frame=min_keep_per_frame,
+            gap_percentile=gap_percentile,
+            temporal_ratio=temporal_ratio,
+            tokens_per_frame=tokens_per_frame,
         )
 
     def generate_until(self, requests: List[Instance]) -> List[str]:

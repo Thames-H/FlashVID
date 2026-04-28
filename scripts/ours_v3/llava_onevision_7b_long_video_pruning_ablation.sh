@@ -7,6 +7,8 @@ cd "${PROJECT_ROOT}"
 
 # Long-video pruning ablations for LLaVA-OneVision FETP-v3.
 # Defaults run stratified sampled LongVideoBench and VideoMME at 10% and 15%.
+# Experiment specs use:
+#   name:policy:min_keep_per_frame[:temporal_ratio[:gap_percentile]]
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export LMMS_EVAL_USE_CACHE="${LMMS_EVAL_USE_CACHE:-True}"
@@ -84,14 +86,16 @@ fi
 BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_frames_num=$MAX_FRAMES_NUM,use_hf_video_processor=$USE_HF_VIDEO_PROCESSOR,attn_implementation=$ATTN_IMPLEMENTATION,dtype=$DTYPE,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE,scoring_text_mode=$SCORING_TEXT_MODE"
 
 for experiment_spec in "${EXPERIMENT_SPECS[@]}"; do
-    IFS=':' read -r experiment_name pruning_policy min_keep_per_frame <<< "$experiment_spec"
+    IFS=':' read -r experiment_name pruning_policy min_keep_per_frame experiment_temporal_ratio experiment_gap_percentile <<< "$experiment_spec"
     if [[ -z "${experiment_name:-}" || -z "${pruning_policy:-}" ]]; then
         echo "Invalid experiment spec: $experiment_spec" >&2
         exit 1
     fi
     min_keep_per_frame="${min_keep_per_frame:-1}"
+    experiment_temporal_ratio="${experiment_temporal_ratio:-$TEMPORAL_RATIO}"
+    experiment_gap_percentile="${experiment_gap_percentile:-$GAP_PERCENTILE}"
 
-    POLICY_ARGS="pruning_policy=$pruning_policy,min_keep_per_frame=$min_keep_per_frame,gap_percentile=$GAP_PERCENTILE,temporal_ratio=$TEMPORAL_RATIO"
+    POLICY_ARGS="pruning_policy=$pruning_policy,min_keep_per_frame=$min_keep_per_frame,gap_percentile=$experiment_gap_percentile,temporal_ratio=$experiment_temporal_ratio"
     if [[ -n "$TOKENS_PER_FRAME" ]]; then
         POLICY_ARGS="$POLICY_ARGS,tokens_per_frame=$TOKENS_PER_FRAME"
     fi
@@ -103,7 +107,7 @@ for experiment_spec in "${EXPERIMENT_SPECS[@]}"; do
         for task in "${TASKS[@]}"; do
             output_path="$OUTPUT_ROOT/$experiment_name/r$ratio_tag/$task"
             log_suffix="${LOG_SAMPLES_SUFFIX_PREFIX}_${experiment_name}_r${ratio_tag}_${task}"
-            echo "Running $task: experiment=$experiment_name policy=$pruning_policy min_keep_per_frame=$min_keep_per_frame retention_ratio=$retention_ratio sample_size=$FETP_SAMPLE_SIZE sample_seed=$FETP_SAMPLE_SEED"
+            echo "Running $task: experiment=$experiment_name policy=$pruning_policy min_keep_per_frame=$min_keep_per_frame temporal_ratio=$experiment_temporal_ratio gap_percentile=$experiment_gap_percentile retention_ratio=$retention_ratio sample_size=$FETP_SAMPLE_SIZE sample_seed=$FETP_SAMPLE_SEED"
 
             accelerate launch \
                 --main_process_port "$MAIN_PROCESS_PORT" \

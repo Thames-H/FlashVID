@@ -6,8 +6,9 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 # Editable configuration. Change values here instead of exporting env vars.
-CUDA_VISIBLE_DEVICES="0,1,2,3"
-NUM_PROCESSES=4
+CUDA_VISIBLE_DEVICES="0"
+LMMS_EVAL_USE_CACHE="True"
+NUM_PROCESSES=1
 MAIN_PROCESS_PORT=18891
 BATCH_SIZE=1
 LOG_SAMPLES_SUFFIX="internvl3_5_ours_v3_8b_img"
@@ -19,7 +20,7 @@ LEGACY_AUTODL_MODEL_PATH="$HOME/autodl-tmp/InternVL3_5-8B"
 DEFAULT_PRETRAINED="OpenGVLab/InternVL3_5-8B-HF"
 PRETRAINED="$DEFAULT_PRETRAINED"
 
-RETENTION_RATIOS=(0.05 0.10 0.20)
+RETENTION_RATIOS=(0.10 0.15)
 SCORING_METHOD="full"
 SHALLOW_LAYERS=4
 TARGET_LAYER=-15
@@ -40,6 +41,7 @@ if [[ -d "$AUTODL_MODEL_PATH" ]]; then
 fi
 
 export CUDA_VISIBLE_DEVICES
+export LMMS_EVAL_USE_CACHE
 
 if [[ "$PRETRAINED" == "$LEGACY_AUTODL_MODEL_PATH" ]]; then
     echo "Error: '$PRETRAINED' is the original InternVL chat-format checkpoint."

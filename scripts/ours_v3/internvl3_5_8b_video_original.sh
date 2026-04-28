@@ -6,10 +6,10 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 # Editable configuration. Change values here instead of exporting env vars.
-CUDA_VISIBLE_DEVICES="0,1,2,3"
+CUDA_VISIBLE_DEVICES="0"
 LMMS_EVAL_USE_CACHE="True"
 LMMS_EVAL_HOME="$PROJECT_ROOT/.cache/lmms-eval"
-NUM_PROCESSES=4
+NUM_PROCESSES=1
 MAIN_PROCESS_PORT=18897
 BATCH_SIZE=1
 LOG_SAMPLES_SUFFIX="internvl3_5_original_8b_video"

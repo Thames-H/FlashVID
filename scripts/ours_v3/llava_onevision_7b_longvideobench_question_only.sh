@@ -6,10 +6,10 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 # Editable configuration. Change values here instead of exporting env vars.
-CUDA_VISIBLE_DEVICES="0,1,2,3"
+CUDA_VISIBLE_DEVICES="0"
 LMMS_EVAL_USE_CACHE="True"
 LMMS_EVAL_HOME="$PROJECT_ROOT/.cache/lmms-eval"
-NUM_PROCESSES=4
+NUM_PROCESSES=1
 MAIN_PROCESS_PORT=18895
 BATCH_SIZE=1
 LOG_SAMPLES_SUFFIX="llava_onevision_ours_v3_7b_longvideobench_question_only"
@@ -21,7 +21,7 @@ AUTODL_MODEL_PATH="$HOME/autodl-tmp/llava-onevision-qwen2-7b-ov-hf"
 DEFAULT_PRETRAINED="llava-hf/llava-onevision-qwen2-7b-ov-hf"
 PRETRAINED="$DEFAULT_PRETRAINED"
 
-RETENTION_RATIOS=(0.05 0.10 0.20)
+RETENTION_RATIOS=(0.10 0.15)
 SCORING_METHOD="full"
 SHALLOW_LAYERS=4
 TARGET_LAYER=15
@@ -31,8 +31,8 @@ TWO_STAGE="false"
 TEXT_CHUNK_SIZE=32
 SCORING_TEXT_MODE="benchmark_question_only"
 
-MAX_FRAMES_NUM=16
-USE_HF_VIDEO_PROCESSOR="true"
+MAX_FRAMES_NUM=32
+USE_HF_VIDEO_PROCESSOR="false"
 ATTN_IMPLEMENTATION="flash_attention_2"
 DTYPE="float16"
 OPENCV_LOG_LEVEL="ERROR"

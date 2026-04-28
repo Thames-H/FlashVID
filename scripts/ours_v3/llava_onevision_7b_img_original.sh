@@ -6,8 +6,9 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 # Editable configuration. Change values here instead of exporting env vars.
-CUDA_VISIBLE_DEVICES="0,1,2,3"
-NUM_PROCESSES=4
+CUDA_VISIBLE_DEVICES="0"
+LMMS_EVAL_USE_CACHE="True"
+NUM_PROCESSES=1
 MAIN_PROCESS_PORT=18896
 BATCH_SIZE=1
 LOG_SAMPLES_SUFFIX="llava_onevision_original_7b_img"
@@ -18,7 +19,7 @@ AUTODL_MODEL_PATH="$HOME/autodl-tmp/llava-onevision-qwen2-7b-ov-hf"
 DEFAULT_PRETRAINED="llava-hf/llava-onevision-qwen2-7b-ov-hf"
 PRETRAINED="$DEFAULT_PRETRAINED"
 
-MAX_FRAMES_NUM=8
+MAX_FRAMES_NUM=32
 ATTN_IMPLEMENTATION="flash_attention_2"
 DTYPE="float16"
 
@@ -27,6 +28,7 @@ if [[ -d "$AUTODL_MODEL_PATH" ]]; then
 fi
 
 export CUDA_VISIBLE_DEVICES
+export LMMS_EVAL_USE_CACHE
 
 BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_frames_num=$MAX_FRAMES_NUM,attn_implementation=$ATTN_IMPLEMENTATION,dtype=$DTYPE"
 

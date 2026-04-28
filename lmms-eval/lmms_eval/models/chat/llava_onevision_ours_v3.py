@@ -1031,7 +1031,7 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         chat_template: Optional[str] = None,
         use_cache: bool = True,
         max_frames_num: Optional[int] = 32,
-        use_hf_video_processor: bool = True,
+        use_hf_video_processor: bool = False,
         retention_ratio: float = 0.25,
         scoring_method: str = "full",
         shallow_layers: int = 4,

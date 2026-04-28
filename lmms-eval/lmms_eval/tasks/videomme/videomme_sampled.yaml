@@ -1,0 +1,3 @@
+include: videomme.yaml
+task: videomme_sampled
+process_docs: !function utils.videomme_process_docs_sampled

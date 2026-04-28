@@ -1,0 +1,3 @@
+include: longvideobench_val_v.yaml
+task: longvideobench_val_v_sampled
+process_docs: !function utils.longvideobench_process_docs_sampled

@@ -9,6 +9,8 @@ import numpy as np
 import yaml
 from loguru import logger as eval_logger
 
+from lmms_eval.tasks._task_utils.stratified_sampling import stratified_sample_dataset
+
 VIDEO_TYPE = ["short", "medium", "long"]
 CATEGORIES = ["Knowledge", "Film & Television", "Sports Competition", "Artistic Performance", "Life Record", "Multilingual"]
 
@@ -132,6 +134,25 @@ def videmme_process_docs_base(dataset: datasets.Dataset, type: str) -> datasets.
 
 
 videomme_process_docs_long = partial(videmme_process_docs_base, type="long")
+
+
+def videomme_process_docs_sampled(dataset: datasets.Dataset) -> datasets.Dataset:
+    return stratified_sample_dataset(
+        dataset,
+        preferred_key_fields=(
+            "duration",
+            "category",
+            "sub_category",
+            "task_category",
+            "task_type",
+            "domain",
+        ),
+        default_size=96,
+    )
+
+
+def videomme_process_docs_long_sampled(dataset: datasets.Dataset) -> datasets.Dataset:
+    return videomme_process_docs_sampled(videomme_process_docs_long(dataset))
 
 
 def _resolve_videomme_video_path(cache_dir, video_id):

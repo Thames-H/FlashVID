@@ -11,6 +11,7 @@ from decord import VideoReader, cpu
 from loguru import logger as eval_logger
 from PIL import Image
 
+from lmms_eval.tasks._task_utils.stratified_sampling import stratified_sample_dataset
 from lmms_eval.tasks._task_utils.file_utils import generate_submission_file
 
 
@@ -168,6 +169,14 @@ def longvideobench_doc_to_visual_i(doc):
     video_path = os.path.join(cache_dir, vid_subdir_name, doc["video_path"])
     max_num_frames = config["dataset_kwargs"].get("max_num_frames", 16)
     return load_video(video_path, doc["duration"], max_num_frames)
+
+
+def longvideobench_process_docs_sampled(dataset):
+    return stratified_sample_dataset(
+        dataset,
+        preferred_key_fields=("duration_group", "question_category"),
+        default_size=96,
+    )
 
 
 def get_multi_choice_info(options):

@@ -6,12 +6,14 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 # Long-video pruning ablations for LLaVA-OneVision FETP-v3.
-# Defaults run LongVideoBench and VideoMME at 10% and 15% retention.
+# Defaults run stratified sampled LongVideoBench and VideoMME at 10% and 15%.
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export LMMS_EVAL_USE_CACHE="${LMMS_EVAL_USE_CACHE:-True}"
 export LMMS_EVAL_HOME="${LMMS_EVAL_HOME:-$PROJECT_ROOT/.cache/lmms-eval}"
 export PYTHONPATH="$PROJECT_ROOT/lmms-eval${PYTHONPATH:+:$PYTHONPATH}"
+export FETP_SAMPLE_SIZE="${FETP_SAMPLE_SIZE:-96}"
+export FETP_SAMPLE_SEED="${FETP_SAMPLE_SEED:-42}"
 export OPENCV_LOG_LEVEL="${OPENCV_LOG_LEVEL:-ERROR}"
 export OPENCV_FFMPEG_LOGLEVEL="${OPENCV_FFMPEG_LOGLEVEL:-8}"
 export AV_LOG_FORCE_NOCOLOR="${AV_LOG_FORCE_NOCOLOR:-1}"
@@ -32,7 +34,7 @@ PRETRAINED="${PRETRAINED:-$DEFAULT_PRETRAINED}"
 if [[ -n "${TASKS_CSV:-}" ]]; then
     IFS=',' read -r -a TASKS <<< "$TASKS_CSV"
 else
-    TASKS=("longvideobench_val_v" "videomme")
+    TASKS=("longvideobench_val_v_sampled" "videomme_sampled")
 fi
 
 if [[ -n "${RETENTION_RATIOS_CSV:-}" ]]; then
@@ -101,7 +103,7 @@ for experiment_spec in "${EXPERIMENT_SPECS[@]}"; do
         for task in "${TASKS[@]}"; do
             output_path="$OUTPUT_ROOT/$experiment_name/r$ratio_tag/$task"
             log_suffix="${LOG_SAMPLES_SUFFIX_PREFIX}_${experiment_name}_r${ratio_tag}_${task}"
-            echo "Running $task: experiment=$experiment_name policy=$pruning_policy min_keep_per_frame=$min_keep_per_frame retention_ratio=$retention_ratio"
+            echo "Running $task: experiment=$experiment_name policy=$pruning_policy min_keep_per_frame=$min_keep_per_frame retention_ratio=$retention_ratio sample_size=$FETP_SAMPLE_SIZE sample_seed=$FETP_SAMPLE_SEED"
 
             accelerate launch \
                 --main_process_port "$MAIN_PROCESS_PORT" \

@@ -21,7 +21,16 @@ generation_kwargs:
 process_results: !function utils.videomme_process_results
 # Note that the metric name can be either a registed metric function (such as the case for GQA) or a key name returned by process_results
 metric_list:
-  - metric: videomme_perception_score
+  - metric: videomme_short_score
+    aggregation: !function utils.videomme_aggregate_short_results
+    higher_is_better: true
+  - metric: videomme_medium_score
+    aggregation: !function utils.videomme_aggregate_medium_results
+    higher_is_better: true
+  - metric: videomme_long_score
+    aggregation: !function utils.videomme_aggregate_long_results
+    higher_is_better: true
+  - metric: videomme_overall_score
     aggregation: !function utils.videomme_aggregate_results
     higher_is_better: true
 lmms_eval_specific_kwargs:

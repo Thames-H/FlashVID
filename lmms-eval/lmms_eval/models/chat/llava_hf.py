@@ -1,3 +1,6 @@
+import contextlib
+import os
+import sys
 import time
 import warnings
 from typing import List
@@ -18,6 +21,60 @@ from lmms_eval.models.simple.llava_hf import LlavaHf as LlavaHfSimple
 
 DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_VIDEO_TOKEN = "<video>"
+
+
+def _quiet_video_decoder_warnings():
+    os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+    os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")
+    os.environ.setdefault("AV_LOG_FORCE_NOCOLOR", "1")
+    os.environ.setdefault("FLASHVID_SUPPRESS_DECODER_STDERR", "1")
+
+    try:
+        import av
+
+        av.logging.set_level(getattr(av.logging, "PANIC", 0))
+    except Exception:
+        pass
+
+    try:
+        import cv2
+
+        log_level_silent = getattr(cv2, "LOG_LEVEL_SILENT", 0)
+        cv2.setLogLevel(log_level_silent)
+    except Exception:
+        pass
+
+
+def _should_suppress_video_decoder_stderr():
+    return os.getenv("FLASHVID_SUPPRESS_DECODER_STDERR", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+@contextlib.contextmanager
+def _suppress_video_decoder_stderr():
+    if not _should_suppress_video_decoder_stderr():
+        yield
+        return
+
+    saved_stderr_fd = None
+    try:
+        sys.stderr.flush()
+        saved_stderr_fd = os.dup(2)
+        with open(os.devnull, "w") as devnull:
+            os.dup2(devnull.fileno(), 2)
+            yield
+    finally:
+        if saved_stderr_fd is not None:
+            sys.stderr.flush()
+            os.dup2(saved_stderr_fd, 2)
+            os.close(saved_stderr_fd)
+
+
+_quiet_video_decoder_warnings()
 
 # Default chat for llava-hf/llava-1.5 models: https://huggingface.co/collections/llava-hf/llava-15-65f762d5b6941db5c2ba07e0
 VICUNA_CHAT_TEMPLATE = "{% for message in messages %}{% if loop.index0 == 0 %}A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. USER: {{ message['content'] }} {% elif message['role'] == 'user' %}USER: {{ message['content'] }} {% else %} ASSISTANT: {{ message['content'] }}{{ eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ 'ASSISTANT:' }}{% endif %}"
@@ -80,6 +137,20 @@ class LlavaHf(LlavaHfSimple):
             prepared_videos = [self.load_video(videos, self.max_frames_num)]
         return prepared_visuals, prepared_videos
 
+    def _prepare_generate_extra_kwargs(
+        self,
+        *,
+        task,
+        split,
+        doc_id,
+        doc,
+        prompt_text,
+        messages,
+        inputs,
+    ):
+        del task, split, doc_id, doc, prompt_text, messages, inputs
+        return {}
+
     def generate_until(self, requests: List[Instance]) -> List[str]:
         original_requests = list(requests)
         cached_responses, pending_requests = self.split_requests_by_cache(
@@ -120,7 +191,8 @@ class LlavaHf(LlavaHfSimple):
             )
             task = task[0]
             split = split[0]
-            chat_messages = [doc_to_messages[0](self.task_dict[task][split][ids]) for ids in doc_id]
+            docs = [self.task_dict[task][split][ids] for ids in doc_id]
+            chat_messages = [doc_to_messages[0](doc) for doc in docs]
             chat_messages: List[ChatMessages] = [ChatMessages(**{"messages": message}) for message in chat_messages]
             visuals = []
             videos = []
@@ -143,7 +215,8 @@ class LlavaHf(LlavaHfSimple):
                 videos,
             )
             try:
-                visuals, videos = self._prepare_chat_media_inputs(visuals, videos)
+                with _suppress_video_decoder_stderr():
+                    visuals, videos = self._prepare_chat_media_inputs(visuals, videos)
             except Exception as e:
                 eval_logger.error(f"Error {e} when loading video: {videos}")
                 res.append("")
@@ -158,8 +231,8 @@ class LlavaHf(LlavaHfSimple):
                 videos_kwargs.pop("num_frames", None)
                 videos_kwargs.pop("do_sample_frames", None)
 
-            inputs = self._prepare_processor_inputs(
-                self._image_processor(
+            with _suppress_video_decoder_stderr():
+                processor_inputs = self._image_processor(
                     images=visuals,
                     videos=videos,
                     text=text,
@@ -167,6 +240,15 @@ class LlavaHf(LlavaHfSimple):
                     **images_kwargs,
                     **videos_kwargs,
                 )
+            inputs = self._prepare_processor_inputs(processor_inputs)
+            extra_generate_kwargs = self._prepare_generate_extra_kwargs(
+                task=task,
+                split=split,
+                doc_id=doc_id[0],
+                doc=docs[0],
+                prompt_text=text,
+                messages=messages,
+                inputs=inputs,
             )
 
             # we assume all gen kwargs in the batch are the same
@@ -187,6 +269,7 @@ class LlavaHf(LlavaHfSimple):
                 start_time = time.time()
                 cont = self.model.generate(
                     **inputs,
+                    **extra_generate_kwargs,
                     do_sample=do_sample,
                     temperature=gen_kwargs["temperature"] if do_sample else None,
                     top_p=gen_kwargs["top_p"],

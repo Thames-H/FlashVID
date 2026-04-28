@@ -381,26 +381,39 @@ def _get_scoring_text_positions(
     return fallback_positions
 
 
-def _videomme_question_text(doc) -> str:
+def _videomme_question_text(doc, include_options: bool = True) -> str:
+    question = str(doc.get("question", "")).strip()
+    if not include_options:
+        return question
     options = "\n".join(str(option) for option in doc.get("options", []))
-    return f"{doc.get('question', '')}\n{options}".strip()
+    return f"{question}\n{options}".strip()
 
 
-def _longvideobench_question_text(doc) -> str:
+def _longvideobench_question_text(doc, include_options: bool = True) -> str:
+    question = str(doc.get("question", "")).strip()
+    if not include_options:
+        return question
     candidates = []
     for i in range(5):
         candidate = doc.get(f"option{i}")
         if candidate and candidate != "N/A":
             candidates.append(f"{chr(ord('A') + i)}. {candidate}")
-    return f"{doc.get('question', '')}\n" + "\n".join(candidates)
+    return f"{question}\n" + "\n".join(candidates)
 
 
-def _benchmark_question_text(task: str, doc) -> Optional[str]:
+def _benchmark_question_text(
+    task: str,
+    doc,
+    include_options: bool = True,
+) -> Optional[str]:
     task_name = str(task).lower()
     if task_name.startswith("videomme"):
-        return _videomme_question_text(doc)
+        return _videomme_question_text(doc, include_options=include_options)
     if task_name.startswith("longvideobench"):
-        return _longvideobench_question_text(doc).strip()
+        return _longvideobench_question_text(
+            doc,
+            include_options=include_options,
+        ).strip()
     return None
 
 
@@ -1121,10 +1134,20 @@ class LlavaOnevisionOursV3(LlavaHfChat):
         if self.scoring_text_mode in ("", "full", "full_prompt", "suffix"):
             return {}
 
-        if self.scoring_text_mode not in (
+        question_with_options_modes = (
             "benchmark_question",
             "question",
+            "question_with_options",
+        )
+        question_only_modes = (
+            "benchmark_question_only",
             "question_only",
+            "question_no_options",
+        )
+
+        if self.scoring_text_mode not in (
+            *question_with_options_modes,
+            *question_only_modes,
         ):
             eval_logger.warning(
                 "FETP(LLaVA-OneVision): unknown scoring_text_mode="
@@ -1132,7 +1155,11 @@ class LlavaOnevisionOursV3(LlavaHfChat):
             )
             return {}
 
-        scoring_text = _benchmark_question_text(task, doc)
+        scoring_text = _benchmark_question_text(
+            task,
+            doc,
+            include_options=self.scoring_text_mode in question_with_options_modes,
+        )
         if not scoring_text:
             eval_logger.warning(
                 f"FETP(LLaVA-OneVision): no benchmark-specific scoring text "

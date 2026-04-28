@@ -1,4 +1,6 @@
+import contextlib
 import os
+import sys
 import time
 import warnings
 from typing import List
@@ -23,13 +25,14 @@ DEFAULT_VIDEO_TOKEN = "<video>"
 
 def _quiet_video_decoder_warnings():
     os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
-    os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "16")
+    os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")
     os.environ.setdefault("AV_LOG_FORCE_NOCOLOR", "1")
+    os.environ.setdefault("FLASHVID_SUPPRESS_DECODER_STDERR", "1")
 
     try:
         import av
 
-        av.logging.set_level(getattr(av.logging, "ERROR", 16))
+        av.logging.set_level(getattr(av.logging, "PANIC", 0))
     except Exception:
         pass
 
@@ -40,6 +43,35 @@ def _quiet_video_decoder_warnings():
         cv2.setLogLevel(log_level_silent)
     except Exception:
         pass
+
+
+def _should_suppress_video_decoder_stderr():
+    return os.getenv("FLASHVID_SUPPRESS_DECODER_STDERR", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+@contextlib.contextmanager
+def _suppress_video_decoder_stderr():
+    if not _should_suppress_video_decoder_stderr():
+        yield
+        return
+
+    saved_stderr_fd = None
+    try:
+        sys.stderr.flush()
+        saved_stderr_fd = os.dup(2)
+        with open(os.devnull, "w") as devnull:
+            os.dup2(devnull.fileno(), 2)
+            yield
+    finally:
+        if saved_stderr_fd is not None:
+            sys.stderr.flush()
+            os.dup2(saved_stderr_fd, 2)
+            os.close(saved_stderr_fd)
 
 
 _quiet_video_decoder_warnings()
@@ -183,7 +215,8 @@ class LlavaHf(LlavaHfSimple):
                 videos,
             )
             try:
-                visuals, videos = self._prepare_chat_media_inputs(visuals, videos)
+                with _suppress_video_decoder_stderr():
+                    visuals, videos = self._prepare_chat_media_inputs(visuals, videos)
             except Exception as e:
                 eval_logger.error(f"Error {e} when loading video: {videos}")
                 res.append("")
@@ -198,8 +231,8 @@ class LlavaHf(LlavaHfSimple):
                 videos_kwargs.pop("num_frames", None)
                 videos_kwargs.pop("do_sample_frames", None)
 
-            inputs = self._prepare_processor_inputs(
-                self._image_processor(
+            with _suppress_video_decoder_stderr():
+                processor_inputs = self._image_processor(
                     images=visuals,
                     videos=videos,
                     text=text,
@@ -207,7 +240,7 @@ class LlavaHf(LlavaHfSimple):
                     **images_kwargs,
                     **videos_kwargs,
                 )
-            )
+            inputs = self._prepare_processor_inputs(processor_inputs)
             extra_generate_kwargs = self._prepare_generate_extra_kwargs(
                 task=task,
                 split=split,

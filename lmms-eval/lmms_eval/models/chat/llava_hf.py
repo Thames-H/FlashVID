@@ -1,3 +1,4 @@
+import os
 import time
 import warnings
 from typing import List
@@ -18,6 +19,30 @@ from lmms_eval.models.simple.llava_hf import LlavaHf as LlavaHfSimple
 
 DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_VIDEO_TOKEN = "<video>"
+
+
+def _quiet_video_decoder_warnings():
+    os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+    os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "16")
+    os.environ.setdefault("AV_LOG_FORCE_NOCOLOR", "1")
+
+    try:
+        import av
+
+        av.logging.set_level(getattr(av.logging, "ERROR", 16))
+    except Exception:
+        pass
+
+    try:
+        import cv2
+
+        log_level_silent = getattr(cv2, "LOG_LEVEL_SILENT", 0)
+        cv2.setLogLevel(log_level_silent)
+    except Exception:
+        pass
+
+
+_quiet_video_decoder_warnings()
 
 # Default chat for llava-hf/llava-1.5 models: https://huggingface.co/collections/llava-hf/llava-15-65f762d5b6941db5c2ba07e0
 VICUNA_CHAT_TEMPLATE = "{% for message in messages %}{% if loop.index0 == 0 %}A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. USER: {{ message['content'] }} {% elif message['role'] == 'user' %}USER: {{ message['content'] }} {% else %} ASSISTANT: {{ message['content'] }}{{ eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ 'ASSISTANT:' }}{% endif %}"

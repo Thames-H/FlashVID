@@ -14,6 +14,7 @@ MAIN_PROCESS_PORT=18897
 BATCH_SIZE=1
 LOG_SAMPLES_SUFFIX="internvl3_5_original_8b_video"
 OUTPUT_PATH="./logs/original_internvl3_5_8b_video"
+CACHE_REQUESTS="true"
 TASKS=("videomme" "longvideobench_val_v")
 
 AUTODL_MODEL_PATH="$HOME/autodl-tmp/InternVL3_5-8B-HF"
@@ -21,11 +22,15 @@ LEGACY_AUTODL_MODEL_PATH="$HOME/autodl-tmp/InternVL3_5-8B"
 DEFAULT_PRETRAINED="OpenGVLab/InternVL3_5-8B-HF"
 PRETRAINED="$DEFAULT_PRETRAINED"
 
-NUM_FRAMES=8
+NUM_FRAMES=32
 MAX_PATCHES=12
 ATTN_IMPLEMENTATION="flash_attention_2"
 LOW_CPU_MEM_USAGE="true"
 DEVICE_MAP=""
+OPENCV_LOG_LEVEL="ERROR"
+OPENCV_FFMPEG_LOGLEVEL="8"
+AV_LOG_FORCE_NOCOLOR="1"
+FLASHVID_SUPPRESS_DECODER_STDERR="1"
 
 if [[ -d "$AUTODL_MODEL_PATH" ]]; then
     PRETRAINED="$AUTODL_MODEL_PATH"
@@ -34,6 +39,15 @@ fi
 export CUDA_VISIBLE_DEVICES
 export LMMS_EVAL_USE_CACHE
 export LMMS_EVAL_HOME
+export OPENCV_LOG_LEVEL
+export OPENCV_FFMPEG_LOGLEVEL
+export AV_LOG_FORCE_NOCOLOR
+export FLASHVID_SUPPRESS_DECODER_STDERR
+
+REQUEST_CACHE_ARGS=()
+if [[ -n "$CACHE_REQUESTS" ]]; then
+    REQUEST_CACHE_ARGS=(--cache_requests "$CACHE_REQUESTS")
+fi
 
 if [[ "$NUM_PROCESSES" == "1" && -z "$DEVICE_MAP" ]]; then
     DEVICE_MAP="auto"
@@ -67,6 +81,7 @@ for task in "${TASKS[@]}"; do
         --model_args "$MODEL_ARGS" \
         --tasks "$task" \
         --batch_size "$BATCH_SIZE" \
+        "${REQUEST_CACHE_ARGS[@]}" \
         --log_samples \
         --log_samples_suffix "$LOG_SAMPLES_SUFFIX" \
         --output_path "$OUTPUT_PATH"

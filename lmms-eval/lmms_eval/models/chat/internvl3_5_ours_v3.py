@@ -159,6 +159,124 @@ def _get_suffix_text_positions(
     return non_visual_positions
 
 
+def _visual_related_token_ids(config, device) -> torch.Tensor:
+    token_ids = []
+    for attr_name in (
+        "image_token_id",
+        "video_token_id",
+        "vision_start_token_id",
+        "vision_end_token_id",
+    ):
+        token_id = getattr(config, attr_name, None)
+        if token_id is not None:
+            token_ids.append(int(token_id))
+    return torch.tensor(token_ids, device=device)
+
+
+def _find_subsequence_positions(
+    sequence: torch.Tensor,
+    pattern: torch.Tensor,
+) -> Optional[torch.Tensor]:
+    if pattern.numel() == 0 or pattern.numel() > sequence.numel():
+        return None
+
+    sequence_cpu = sequence.detach().cpu()
+    pattern_cpu = pattern.detach().cpu()
+    for start in range(sequence.numel() - pattern.numel() + 1):
+        end = start + pattern.numel()
+        if torch.equal(sequence_cpu[start:end], pattern_cpu):
+            return torch.arange(start, end, device=sequence.device)
+    return None
+
+
+def _get_scoring_text_positions(
+    input_ids: torch.Tensor,
+    visual_positions: torch.Tensor,
+    config,
+    scoring_input_ids: Optional[torch.Tensor],
+) -> torch.Tensor:
+    fallback_positions = _get_suffix_text_positions(
+        input_ids,
+        visual_positions,
+        config.image_token_id,
+    )
+    if scoring_input_ids is None:
+        return fallback_positions
+
+    if scoring_input_ids.ndim > 1:
+        scoring_input_ids = scoring_input_ids[0]
+    scoring_input_ids = scoring_input_ids.to(input_ids.device).flatten()
+
+    visual_related_token_ids = _visual_related_token_ids(
+        config,
+        input_ids.device,
+    )
+    if visual_related_token_ids.numel() > 0:
+        scoring_input_ids = scoring_input_ids[
+            ~torch.isin(scoring_input_ids, visual_related_token_ids)
+        ]
+
+    max_trim = min(3, int(scoring_input_ids.numel()))
+    for left_trim in range(max_trim + 1):
+        for right_trim in range(max_trim + 1):
+            end = scoring_input_ids.numel() - right_trim
+            if end <= left_trim:
+                continue
+            candidate = scoring_input_ids[left_trim:end]
+            positions = _find_subsequence_positions(input_ids, candidate)
+            if positions is not None:
+                if visual_related_token_ids.numel() > 0:
+                    visual_mask = torch.isin(
+                        input_ids.index_select(0, positions),
+                        visual_related_token_ids,
+                    )
+                    positions = positions[~visual_mask]
+                if positions.numel() > 0:
+                    return positions
+
+    eval_logger.debug(
+        "FETP(InternVL3.5): scoring text tokens were not found in the "
+        "full prompt; falling back to the prompt suffix."
+    )
+    return fallback_positions
+
+
+def _videomme_question_text(doc, include_options: bool = True) -> str:
+    question = str(doc.get("question", "")).strip()
+    if not include_options:
+        return question
+    options = "\n".join(str(option) for option in doc.get("options", []))
+    return f"{question}\n{options}".strip()
+
+
+def _longvideobench_question_text(doc, include_options: bool = True) -> str:
+    question = str(doc.get("question", "")).strip()
+    if not include_options:
+        return question
+    candidates = []
+    for i in range(5):
+        candidate = doc.get(f"option{i}")
+        if candidate and candidate != "N/A":
+            candidates.append(f"{chr(ord('A') + i)}. {candidate}")
+    return f"{question}\n" + "\n".join(candidates)
+
+
+def _benchmark_question_text(
+    task: str,
+    doc,
+    include_options: bool = True,
+) -> Optional[str]:
+    task_name = str(task).lower()
+    if task_name.startswith("videomme"):
+        return _videomme_question_text(doc, include_options=include_options)
+    if task_name.startswith("longvideobench"):
+        return _longvideobench_question_text(
+            doc,
+            include_options=include_options,
+        ).strip()
+    return None
+
+
 def _truncate_text_positions(
     text_positions: torch.Tensor,
     max_text_tokens: Optional[int],
@@ -517,6 +635,7 @@ def _make_fetp_forward(
         inputs_embeds: torch.FloatTensor | None = None,
         vision_feature_layer: int | list[int] | None = None,
         vision_feature_select_strategy: str | None = None,
+        fetp_scoring_input_ids: Optional[torch.Tensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | InternVLModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -527,6 +646,12 @@ def _make_fetp_forward(
             is_prefill_stage = past_key_values.get_seq_length() == 0
         if is_prefill_stage or not hasattr(self, "_fetp_last_pruning_stats"):
             self._fetp_last_pruning_stats = {}
+        if fetp_scoring_input_ids is None:
+            fetp_scoring_input_ids = getattr(
+                self,
+                "_fetp_scoring_input_ids",
+                None,
+            )
 
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
@@ -625,10 +750,11 @@ def _make_fetp_forward(
                         )
                     num_keep = min(num_keep, int(num_visual_tokens))
 
-                    text_positions = _get_suffix_text_positions(
+                    text_positions = _get_scoring_text_positions(
                         input_ids[0],
                         visual_positions,
-                        self.config.image_token_id,
+                        self.config,
+                        fetp_scoring_input_ids,
                     )
                     (
                         resolved_scoring_method,
@@ -868,6 +994,7 @@ class InternVL3_5_Ours_V3(InternVLHf):
         use_deviation: bool = True,
         two_stage: bool = False,
         text_chunk_size: Optional[int] = 32,
+        scoring_text_mode: str = "full_prompt",
         profile_reference_scoring: bool = False,
         reference_scoring_method: str = "shallow",
         **kwargs,
@@ -889,9 +1016,11 @@ class InternVL3_5_Ours_V3(InternVLHf):
         self.max_score_text_tokens = max_score_text_tokens
         self.max_score_heads = max_score_heads
         self.text_chunk_size = text_chunk_size
+        self.scoring_text_mode = str(scoring_text_mode)
         self._cache_identity = {
             "retention_ratio": retention_ratio,
             "scoring_method": scoring_method,
+            "scoring_text_mode": self.scoring_text_mode,
             "shallow_layers": shallow_layers,
             "target_layer": target_layer,
             "anchor_layers": anchor_layers,
@@ -913,7 +1042,8 @@ class InternVL3_5_Ours_V3(InternVLHf):
             f"candidate_ratio={candidate_ratio}, "
             f"max_score_text_tokens={max_score_text_tokens}, "
             f"max_score_heads={max_score_heads}, "
-            f"text_chunk_size={text_chunk_size}"
+            f"text_chunk_size={text_chunk_size}, "
+            f"scoring_text_mode={self.scoring_text_mode}"
         )
 
         InternVLModel.forward = _make_fetp_forward(
@@ -930,6 +1060,57 @@ class InternVL3_5_Ours_V3(InternVLHf):
             two_stage=two_stage,
             text_chunk_size=text_chunk_size,
         )
+
+    def _set_fetp_scoring_input_ids(self, scoring_input_ids):
+        inner_model = getattr(self.model, "model", None)
+        if inner_model is not None:
+            setattr(inner_model, "_fetp_scoring_input_ids", scoring_input_ids)
+
+    def _prepare_fetp_scoring_input_ids(self, *, task, doc, inputs):
+        self._set_fetp_scoring_input_ids(None)
+        if self.scoring_text_mode in ("", "full", "full_prompt", "suffix"):
+            return
+
+        question_with_options_modes = (
+            "benchmark_question",
+            "question",
+            "question_with_options",
+        )
+        question_only_modes = (
+            "benchmark_question_only",
+            "question_only",
+            "question_no_options",
+        )
+
+        if self.scoring_text_mode not in (
+            *question_with_options_modes,
+            *question_only_modes,
+        ):
+            eval_logger.warning(
+                "FETP(InternVL3.5): unknown scoring_text_mode="
+                f"{self.scoring_text_mode!r}; using the full prompt suffix."
+            )
+            return
+
+        scoring_text = _benchmark_question_text(
+            task,
+            doc,
+            include_options=self.scoring_text_mode in question_with_options_modes,
+        )
+        if not scoring_text:
+            eval_logger.warning(
+                f"FETP(InternVL3.5): no benchmark-specific scoring text "
+                f"for task={task}; using the full prompt suffix."
+            )
+            return
+
+        scoring_text = f"\n{scoring_text.strip()}\n"
+        scoring_input_ids = self.tokenizer(
+            scoring_text,
+            add_special_tokens=False,
+            return_tensors="pt",
+        ).input_ids.to(inputs["input_ids"].device)
+        self._set_fetp_scoring_input_ids(scoring_input_ids)
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         original_requests = list(requests)
@@ -975,7 +1156,8 @@ class InternVL3_5_Ours_V3(InternVLHf):
             )
             task = task[0]
             split = split[0]
-            chat_messages = [doc_to_messages[0](self.task_dict[task][split][ids]) for ids in doc_id]
+            docs = [self.task_dict[task][split][ids] for ids in doc_id]
+            chat_messages = [doc_to_messages[0](doc) for doc in docs]
             chat_messages = [ChatMessages(**{"messages": message}) for message in chat_messages]
             visuals = []
             videos = []
@@ -1014,6 +1196,25 @@ class InternVL3_5_Ours_V3(InternVLHf):
                 **images_kwargs,
                 **videos_kwargs,
             ).to(self.device, self.model.dtype)
+
+            if len(docs) == 1:
+                self._prepare_fetp_scoring_input_ids(
+                    task=task,
+                    doc=docs[0],
+                    inputs=inputs,
+                )
+            else:
+                self._set_fetp_scoring_input_ids(None)
+                if self.scoring_text_mode not in (
+                    "",
+                    "full",
+                    "full_prompt",
+                    "suffix",
+                ):
+                    eval_logger.warning(
+                        "FETP(InternVL3.5): benchmark-specific scoring text "
+                        "requires batch_size=1; using the full prompt suffix."
+                    )
 
             gen_kwargs = all_gen_kwargs[0]
             if "max_new_tokens" not in gen_kwargs:

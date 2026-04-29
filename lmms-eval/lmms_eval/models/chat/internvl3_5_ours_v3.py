@@ -27,6 +27,7 @@ from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.chat.internvl_hf import (
     InternVLHf,
+    _build_internvl_processor_kwargs,
     _prepare_internvl_media_inputs,
 )
 from lmms_eval.models.model_utils.gen_metrics import log_metrics
@@ -317,6 +318,19 @@ def _select_candidate_indices(
     num_candidate = max(num_keep, int(total * candidate_ratio))
     num_candidate = min(total, num_candidate)
     return coarse_scores.topk(num_candidate).indices.sort().values
+
+
+def _uniform_keep_indices(num_tokens: int, num_keep: int, device) -> torch.Tensor:
+    if num_keep >= num_tokens:
+        return torch.arange(num_tokens, device=device)
+    step = num_tokens / num_keep
+    return (
+        torch.arange(num_keep, device=device)
+        .float()
+        .mul(step)
+        .long()
+        .clamp(max=num_tokens - 1)
+    )
 
 
 def _tensor_summary(tensor: torch.Tensor) -> dict:
@@ -618,6 +632,7 @@ def _make_fetp_forward(
     target_layer: int,
     anchor_layers: Optional[Union[str, Sequence[int]]] = None,
     candidate_ratio: float = 1.0,
+    max_scoring_visual_tokens: Optional[int] = None,
     max_score_text_tokens: Optional[int] = None,
     max_score_heads: Optional[int] = None,
     use_alpha: bool = True,
@@ -692,6 +707,7 @@ def _make_fetp_forward(
             num_visual_tokens = int(visual_positions.numel())
             original_num_visual_tokens = num_visual_tokens
             num_visual_tokens_after_stage1 = None
+            num_keep = None
 
             if num_visual_tokens > 0:
                 total_pruning_start = time.perf_counter()
@@ -749,6 +765,60 @@ def _make_fetp_forward(
                             min(int(retention_ratio), original_num_visual_tokens),
                         )
                     num_keep = min(num_keep, int(num_visual_tokens))
+
+                    if (
+                        max_scoring_visual_tokens is not None
+                        and max_scoring_visual_tokens > 0
+                        and num_visual_tokens > max(num_keep, max_scoring_visual_tokens)
+                    ):
+                        num_scoring_visual_tokens = max(
+                            num_keep,
+                            int(max_scoring_visual_tokens),
+                        )
+                        num_scoring_visual_tokens = min(
+                            num_scoring_visual_tokens,
+                            num_visual_tokens,
+                        )
+                        scoring_keep_local = _uniform_keep_indices(
+                            num_visual_tokens,
+                            num_scoring_visual_tokens,
+                            visual_positions.device,
+                        )
+                        non_visual_positions = torch.where(
+                            input_ids[0] != self.config.image_token_id
+                        )[0]
+                        keep_indices = torch.cat(
+                            [
+                                non_visual_positions,
+                                visual_positions.index_select(0, scoring_keep_local),
+                            ],
+                            dim=0,
+                        ).sort().values
+
+                        hidden_size = inputs_embeds.shape[-1]
+                        gather_index = keep_indices.view(1, -1, 1).expand(
+                            inputs_embeds.shape[0],
+                            -1,
+                            hidden_size,
+                        )
+                        inputs_embeds = torch.gather(
+                            inputs_embeds,
+                            dim=1,
+                            index=gather_index,
+                        )
+                        input_ids = input_ids.index_select(1, keep_indices)
+                        attention_mask = _slice_sequence_tensor(
+                            attention_mask,
+                            keep_indices,
+                        )
+                        position_ids = _slice_sequence_tensor(
+                            position_ids,
+                            keep_indices,
+                        )
+                        visual_positions = torch.where(
+                            input_ids[0] == self.config.image_token_id
+                        )[0]
+                        num_visual_tokens = int(visual_positions.numel())
 
                     text_positions = _get_scoring_text_positions(
                         input_ids[0],
@@ -946,14 +1016,89 @@ def _make_fetp_forward(
                         f"pruning_ms={self._fetp_last_pruning_stats['pruning_total_time_ms']:.2f}"
                     )
                 except Exception as exc:
-                    self._fetp_last_pruning_stats = {
-                        "pruning_error": str(exc),
-                        "pruning_num_visual_tokens": original_num_visual_tokens,
-                        "pruning_two_stage": bool(two_stage),
-                    }
-                    eval_logger.warning(
-                        f"InternVL3.5 FETP pruning skipped due to scoring failure: {exc}"
-                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                    if num_keep is not None and num_visual_tokens > 0:
+                        keep_within_visual = _uniform_keep_indices(
+                            num_visual_tokens,
+                            int(num_keep),
+                            visual_positions.device,
+                        )
+                        keep_visual_positions = visual_positions.index_select(
+                            0,
+                            keep_within_visual,
+                        )
+                        non_visual_positions = torch.where(
+                            input_ids[0] != self.config.image_token_id
+                        )[0]
+                        keep_indices = torch.cat(
+                            [non_visual_positions, keep_visual_positions],
+                            dim=0,
+                        ).sort().values
+
+                        hidden_size = inputs_embeds.shape[-1]
+                        gather_index = keep_indices.view(1, -1, 1).expand(
+                            inputs_embeds.shape[0],
+                            -1,
+                            hidden_size,
+                        )
+                        inputs_embeds = torch.gather(
+                            inputs_embeds,
+                            dim=1,
+                            index=gather_index,
+                        )
+                        input_ids = input_ids.index_select(1, keep_indices)
+                        attention_mask = _slice_sequence_tensor(
+                            attention_mask,
+                            keep_indices,
+                        )
+                        position_ids = _slice_sequence_tensor(
+                            position_ids,
+                            keep_indices,
+                        )
+
+                        if image_hidden_states is not None:
+                            kept_visual_mask = (
+                                input_ids[0] == self.config.image_token_id
+                            )
+                            kept_visual_indices = torch.where(kept_visual_mask)[0]
+                            image_hidden_states = inputs_embeds.index_select(
+                                1,
+                                kept_visual_indices,
+                            )
+
+                        self._fetp_last_pruning_stats = _summarize_pruning_stats(
+                            scoring_method="uniform_fallback",
+                            anchor_layers=(),
+                            num_visual_tokens=original_num_visual_tokens,
+                            num_keep=int(num_keep),
+                            scoring_time_s=0.0,
+                            total_pruning_time_s=(
+                                time.perf_counter() - total_pruning_start
+                            ),
+                            candidate_size=num_visual_tokens,
+                            score_query_tokens=0,
+                            score_heads=0,
+                        )
+                        self._fetp_last_pruning_stats["pruning_error"] = str(exc)
+                        self._fetp_last_pruning_stats["pruning_two_stage"] = bool(
+                            two_stage
+                        )
+                        eval_logger.warning(
+                            "InternVL3.5 FETP scoring failed; used uniform "
+                            f"fallback pruning instead: {exc}"
+                        )
+                    else:
+                        self._fetp_last_pruning_stats = {
+                            "pruning_error": str(exc),
+                            "pruning_num_visual_tokens": original_num_visual_tokens,
+                            "pruning_two_stage": bool(two_stage),
+                        }
+                        eval_logger.warning(
+                            "InternVL3.5 FETP pruning skipped due to scoring "
+                            f"failure before num_keep was available: {exc}"
+                        )
 
         outputs = self.language_model(
             attention_mask=attention_mask,
@@ -988,6 +1133,7 @@ class InternVL3_5_Ours_V3(InternVLHf):
         anchor_layers: Optional[Union[str, Sequence[int]]] = None,
         anchor_weights: Optional[Union[str, Sequence[float]]] = None,
         candidate_ratio: float = 1.0,
+        max_scoring_visual_tokens: Optional[int] = None,
         max_score_text_tokens: Optional[int] = None,
         max_score_heads: Optional[int] = None,
         use_alpha: bool = True,
@@ -1013,6 +1159,7 @@ class InternVL3_5_Ours_V3(InternVLHf):
         self.use_deviation = use_deviation
         self.two_stage = two_stage
         self.candidate_ratio = candidate_ratio
+        self.max_scoring_visual_tokens = max_scoring_visual_tokens
         self.max_score_text_tokens = max_score_text_tokens
         self.max_score_heads = max_score_heads
         self.text_chunk_size = text_chunk_size
@@ -1028,6 +1175,7 @@ class InternVL3_5_Ours_V3(InternVLHf):
             "use_deviation": use_deviation,
             "two_stage": two_stage,
             "candidate_ratio": candidate_ratio,
+            "max_scoring_visual_tokens": max_scoring_visual_tokens,
             "max_score_text_tokens": max_score_text_tokens,
             "max_score_heads": max_score_heads,
             "text_chunk_size": text_chunk_size,
@@ -1040,6 +1188,7 @@ class InternVL3_5_Ours_V3(InternVLHf):
             f"target_layer={target_layer}, "
             f"two_stage={two_stage}, "
             f"candidate_ratio={candidate_ratio}, "
+            f"max_scoring_visual_tokens={max_scoring_visual_tokens}, "
             f"max_score_text_tokens={max_score_text_tokens}, "
             f"max_score_heads={max_score_heads}, "
             f"text_chunk_size={text_chunk_size}, "
@@ -1053,6 +1202,7 @@ class InternVL3_5_Ours_V3(InternVLHf):
             target_layer=target_layer,
             anchor_layers=anchor_layers,
             candidate_ratio=candidate_ratio,
+            max_scoring_visual_tokens=max_scoring_visual_tokens,
             max_score_text_tokens=max_score_text_tokens,
             max_score_heads=max_score_heads,
             use_alpha=use_alpha,
@@ -1168,16 +1318,13 @@ class InternVL3_5_Ours_V3(InternVLHf):
             visuals = self.flatten(visuals)
             videos = self.flatten(videos)
 
-            images_kwargs = {}
-            videos_kwargs = {}
-            if self.min_patches is not None:
-                images_kwargs["min_patches"] = self.min_patches
-            if self.max_patches is not None:
-                images_kwargs["max_patches"] = self.max_patches
-            if self.num_frames is not None:
-                videos_kwargs["num_frames"] = self.num_frames
-            if self.fps is not None:
-                videos_kwargs["fps"] = self.fps
+            images_kwargs, videos_kwargs = _build_internvl_processor_kwargs(
+                model_config=self.config,
+                min_patches=self.min_patches,
+                max_patches=self.max_patches,
+                num_frames=self.num_frames,
+                fps=self.fps,
+            )
 
             messages = chat_messages[0].model_dump()["messages"]
             text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -1217,6 +1364,7 @@ class InternVL3_5_Ours_V3(InternVLHf):
                     )
 
             gen_kwargs = all_gen_kwargs[0]
+            gen_kwargs["image_sizes"] = image_sizes
             if "max_new_tokens" not in gen_kwargs:
                 gen_kwargs["max_new_tokens"] = 1024
             if "temperature" not in gen_kwargs:

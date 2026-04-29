@@ -66,6 +66,83 @@ def _prepare_internvl_media_inputs(visuals, videos):
     return normalized_visuals, normalized_videos, image_sizes
 
 
+def _infer_internvl_video_size(model_config) -> Optional[dict]:
+    vision_config = getattr(model_config, "vision_config", None)
+    image_size = getattr(vision_config, "image_size", None)
+    if image_size is None:
+        return None
+
+    if isinstance(image_size, (list, tuple)):
+        if len(image_size) == 0:
+            return None
+        height = int(image_size[0])
+        width = int(image_size[-1])
+    else:
+        height = int(image_size)
+        width = int(image_size)
+
+    return {"height": height, "width": width}
+
+
+def _build_internvl_processor_kwargs(
+    *,
+    model_config,
+    min_patches: Optional[int],
+    max_patches: Optional[int],
+    num_frames: Optional[int],
+    fps: Optional[float],
+) -> Tuple[dict, dict]:
+    images_kwargs = {}
+    videos_kwargs = {}
+
+    if min_patches is not None:
+        images_kwargs["min_patches"] = min_patches
+    if max_patches is not None:
+        images_kwargs["max_patches"] = max_patches
+    if num_frames is not None:
+        videos_kwargs["num_frames"] = num_frames
+    if fps is not None:
+        videos_kwargs["fps"] = fps
+
+    if videos_kwargs:
+        videos_kwargs["do_sample_frames"] = True
+        video_size = _infer_internvl_video_size(model_config)
+        if video_size is not None:
+            videos_kwargs["size"] = video_size
+
+    return images_kwargs, videos_kwargs
+
+
+def _ensure_internvl_attn_implementation(model, attn_implementation: Optional[str]) -> None:
+    if not attn_implementation:
+        return
+
+    if hasattr(model, "set_attn_implementation"):
+        model.set_attn_implementation(attn_implementation)
+
+    root_config = getattr(model, "config", None)
+    inner_model = getattr(model, "model", None)
+    vision_model = getattr(inner_model, "vision_tower", None)
+    language_model = getattr(inner_model, "language_model", None)
+
+    for config in (
+        root_config,
+        getattr(root_config, "vision_config", None),
+        getattr(root_config, "text_config", None),
+        getattr(vision_model, "config", None),
+        getattr(language_model, "config", None),
+    ):
+        if config is not None:
+            config._attn_implementation = attn_implementation
+
+    eval_logger.info(
+        "InternVL attention implementation: "
+        f"root={getattr(root_config, '_attn_implementation', None)}, "
+        f"vision={getattr(getattr(vision_model, 'config', None), '_attn_implementation', None)}, "
+        f"text={getattr(getattr(language_model, 'config', None), '_attn_implementation', None)}"
+    )
+
+
 @register_model("internvl_hf_chat")
 class InternVLHf(lmms):
     """
@@ -149,6 +226,7 @@ class InternVLHf(lmms):
             trust_remote_code=trust_remote_code,
             device_map=self.device_map,
         ).eval()
+        _ensure_internvl_attn_implementation(self._model, attn_implementation)
         self._config = self._model.config
 
         self.processor = AutoProcessor.from_pretrained(
@@ -306,16 +384,13 @@ class InternVLHf(lmms):
             visuals = self.flatten(visuals)
             videos = self.flatten(videos)
 
-            images_kwargs = {}
-            videos_kwargs = {}
-            if self.min_patches is not None:
-                images_kwargs["min_patches"] = self.min_patches
-            if self.max_patches is not None:
-                images_kwargs["max_patches"] = self.max_patches
-            if self.num_frames is not None:
-                videos_kwargs["num_frames"] = self.num_frames
-            if self.fps is not None:
-                videos_kwargs["fps"] = self.fps
+            images_kwargs, videos_kwargs = _build_internvl_processor_kwargs(
+                model_config=self.config,
+                min_patches=self.min_patches,
+                max_patches=self.max_patches,
+                num_frames=self.num_frames,
+                fps=self.fps,
+            )
 
             # Apply chat template
             messages = chat_messages[0].model_dump()["messages"]

@@ -35,6 +35,8 @@ MAX_SCORE_HEADS=0
 TEXT_CHUNK_SIZE=32
 SCORING_TEXT_MODE="benchmark_question"
 
+DEVICE_MAP="auto"
+MIN_PATCHES=1
 MAX_PATCHES=12
 NUM_FRAMES=32
 ATTN_IMPLEMENTATION="flash_attention_2"
@@ -68,7 +70,7 @@ if [[ -n "$CACHE_REQUESTS" ]]; then
     REQUEST_CACHE_ARGS=(--cache_requests "$CACHE_REQUESTS")
 fi
 
-BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_patches=$MAX_PATCHES,num_frames=$NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,candidate_ratio=$CANDIDATE_RATIO,text_chunk_size=$TEXT_CHUNK_SIZE,scoring_text_mode=$SCORING_TEXT_MODE"
+BASE_MODEL_ARGS="pretrained=$PRETRAINED,device_map=$DEVICE_MAP,min_patches=$MIN_PATCHES,max_patches=$MAX_PATCHES,num_frames=$NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,candidate_ratio=$CANDIDATE_RATIO,text_chunk_size=$TEXT_CHUNK_SIZE,scoring_text_mode=$SCORING_TEXT_MODE"
 if [[ "$MAX_SCORE_TEXT_TOKENS" != "0" ]]; then
     BASE_MODEL_ARGS="$BASE_MODEL_ARGS,max_score_text_tokens=$MAX_SCORE_TEXT_TOKENS"
 fi

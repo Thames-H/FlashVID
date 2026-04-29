@@ -23,10 +23,11 @@ DEFAULT_PRETRAINED="OpenGVLab/InternVL3_5-8B-HF"
 PRETRAINED="$DEFAULT_PRETRAINED"
 
 NUM_FRAMES=32
+MIN_PATCHES=1
 MAX_PATCHES=12
 ATTN_IMPLEMENTATION="flash_attention_2"
 LOW_CPU_MEM_USAGE="true"
-DEVICE_MAP=""
+DEVICE_MAP="auto"
 OPENCV_LOG_LEVEL="ERROR"
 OPENCV_FFMPEG_LOGLEVEL="8"
 AV_LOG_FORCE_NOCOLOR="1"
@@ -65,7 +66,7 @@ if [[ "$PRETRAINED" == "$LEGACY_AUTODL_MODEL_PATH" ]]; then
     exit 1
 fi
 
-MODEL_ARGS="pretrained=$PRETRAINED,max_patches=$MAX_PATCHES,num_frames=$NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,low_cpu_mem_usage=$LOW_CPU_MEM_USAGE"
+MODEL_ARGS="pretrained=$PRETRAINED,min_patches=$MIN_PATCHES,max_patches=$MAX_PATCHES,num_frames=$NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,low_cpu_mem_usage=$LOW_CPU_MEM_USAGE"
 if [[ -n "$DEVICE_MAP" ]]; then
     MODEL_ARGS="$MODEL_ARGS,device_map=$DEVICE_MAP"
 fi

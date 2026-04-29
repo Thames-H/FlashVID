@@ -14,6 +14,8 @@ if [[ ! "$TARGET_LAYER" =~ ^-?[0-9]+$ ]]; then
     exit 2
 fi
 export TARGET_LAYER
+export CACHE_REQUESTS="${CACHE_REQUESTS:-false}"
+export LOG_SAMPLES="${LOG_SAMPLES:-false}"
 
 JOBS=(
     "scripts/ours_v3/qwen3_vl_8b_longvideobench_question_only.sh"
@@ -31,17 +33,22 @@ if [[ "$WAIT_FOR_GPU" == "true" ]]; then
     trap 'rm -f "$queue_file"' EXIT
 
     for job in "${JOBS[@]}"; do
-        printf "TARGET_LAYER=%s bash %s\n" "$TARGET_LAYER" "$job" >> "$queue_file"
+        printf "TARGET_LAYER=%q CACHE_REQUESTS=%q LOG_SAMPLES=%q bash %q\n" \
+            "$TARGET_LAYER" \
+            "$CACHE_REQUESTS" \
+            "$LOG_SAMPLES" \
+            "$job" \
+            >> "$queue_file"
     done
 
-    echo "[$(timestamp)] Running Qwen3-VL question video jobs via GPU-idle queue with TARGET_LAYER=${TARGET_LAYER}."
+    echo "[$(timestamp)] Running Qwen3-VL question video jobs via GPU-idle queue with TARGET_LAYER=${TARGET_LAYER}, CACHE_REQUESTS=${CACHE_REQUESTS}, LOG_SAMPLES=${LOG_SAMPLES}."
     bash "${SCRIPT_DIR}/run_when_gpu_free.sh" "$queue_file"
 else
-    echo "[$(timestamp)] Running Qwen3-VL question video jobs sequentially with TARGET_LAYER=${TARGET_LAYER}."
+    echo "[$(timestamp)] Running Qwen3-VL question video jobs sequentially with TARGET_LAYER=${TARGET_LAYER}, CACHE_REQUESTS=${CACHE_REQUESTS}, LOG_SAMPLES=${LOG_SAMPLES}."
     for job in "${JOBS[@]}"; do
-        echo "[$(timestamp)] Starting: TARGET_LAYER=${TARGET_LAYER} bash $job"
-        TARGET_LAYER="$TARGET_LAYER" bash "$job"
-        echo "[$(timestamp)] Finished: TARGET_LAYER=${TARGET_LAYER} bash $job"
+        echo "[$(timestamp)] Starting: TARGET_LAYER=${TARGET_LAYER} CACHE_REQUESTS=${CACHE_REQUESTS} LOG_SAMPLES=${LOG_SAMPLES} bash $job"
+        TARGET_LAYER="$TARGET_LAYER" CACHE_REQUESTS="$CACHE_REQUESTS" LOG_SAMPLES="$LOG_SAMPLES" bash "$job"
+        echo "[$(timestamp)] Finished: TARGET_LAYER=${TARGET_LAYER} CACHE_REQUESTS=${CACHE_REQUESTS} LOG_SAMPLES=${LOG_SAMPLES} bash $job"
     done
 fi
 

@@ -5,18 +5,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-# Editable configuration. Change values here instead of exporting env vars.
+# Default inference configuration. Override with env vars or edit values here.
 CUDA_VISIBLE_DEVICES="0"
 LMMS_EVAL_USE_CACHE="True"
-LMMS_EVAL_HOME="$PROJECT_ROOT/.cache/lmms-eval"
+LMMS_EVAL_HOME="${LMMS_EVAL_HOME:-$PROJECT_ROOT/.cache/lmms-eval}"
 PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 NUM_PROCESSES=1
 MAIN_PROCESS_PORT=18914
 BATCH_SIZE=1
 LOW_CPU_MEM_USAGE="${LOW_CPU_MEM_USAGE:-true}"
 LOG_SAMPLES_SUFFIX="internvl3_5_ours_v3_8b_longvideobench_question_only"
-OUTPUT_PATH="./logs/ours_v3_internvl3_5_8b_longvideobench_question_only"
-CACHE_REQUESTS="true"
+OUTPUT_PATH="${OUTPUT_PATH:-./logs/ours_v3_internvl3_5_8b_longvideobench_question_only}"
+CACHE_REQUESTS="${CACHE_REQUESTS:-false}"
+LOG_SAMPLES="${LOG_SAMPLES:-false}"
 TASKS=("longvideobench_val_v")
 
 AUTODL_MODEL_PATH="$HOME/autodl-tmp/InternVL3_5-8B-HF"
@@ -70,8 +71,13 @@ if [[ "$PRETRAINED" == "$LEGACY_AUTODL_MODEL_PATH" ]]; then
 fi
 
 REQUEST_CACHE_ARGS=()
-if [[ -n "$CACHE_REQUESTS" ]]; then
+if [[ -n "$CACHE_REQUESTS" && "$CACHE_REQUESTS" != "false" ]]; then
     REQUEST_CACHE_ARGS=(--cache_requests "$CACHE_REQUESTS")
+fi
+
+LOG_SAMPLE_ARGS=()
+if [[ "$LOG_SAMPLES" == "true" ]]; then
+    LOG_SAMPLE_ARGS=(--log_samples --log_samples_suffix "$LOG_SAMPLES_SUFFIX")
 fi
 
 BASE_MODEL_ARGS="pretrained=$PRETRAINED,device_map=$DEVICE_MAP,min_patches=$MIN_PATCHES,max_patches=$MAX_PATCHES,num_frames=$NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,low_cpu_mem_usage=$LOW_CPU_MEM_USAGE,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,candidate_ratio=$CANDIDATE_RATIO,max_scoring_visual_tokens=$MAX_SCORING_VISUAL_TOKENS,text_chunk_size=$TEXT_CHUNK_SIZE,scoring_text_mode=$SCORING_TEXT_MODE"
@@ -96,8 +102,7 @@ for retention_ratio in "${RETENTION_RATIOS[@]}"; do
             --tasks "$task" \
             --batch_size "$BATCH_SIZE" \
             "${REQUEST_CACHE_ARGS[@]}" \
-            --log_samples \
-            --log_samples_suffix "$LOG_SAMPLES_SUFFIX" \
+            "${LOG_SAMPLE_ARGS[@]}" \
             --output_path "$OUTPUT_PATH"
     done
     echo "Finished running LongVideoBench with retention_ratio=${retention_ratio}"

@@ -19,7 +19,8 @@ if [[ ! "$TARGET_LAYER" =~ ^-?[0-9]+$ ]]; then
 fi
 
 export TARGET_LAYER
-export CACHE_REQUESTS="${CACHE_REQUESTS:-true}"
+export CACHE_REQUESTS="${CACHE_REQUESTS:-false}"
+export LOG_SAMPLES="${LOG_SAMPLES:-false}"
 export LMMS_EVAL_HOME="${LMMS_EVAL_HOME:-${PROJECT_ROOT}/.cache/lmms-eval}"
 
 DONE_DIR="${WATCHDOG_DONE_DIR:-logs/watchdog_done/qwen3_vl_8b_question_video_layer${TARGET_LAYER}}"
@@ -32,10 +33,12 @@ append_job() {
     local job_name="$1"
     local script_path="$2"
     local done_marker="${DONE_DIR}/${job_name}.done"
-    printf "%s\t%s\tTARGET_LAYER=%s CACHE_REQUESTS=true LMMS_EVAL_HOME=%q bash %q\n" \
+    printf "%s\t%s\tTARGET_LAYER=%q CACHE_REQUESTS=%q LOG_SAMPLES=%q LMMS_EVAL_HOME=%q bash %q\n" \
         "$job_name" \
         "$done_marker" \
         "$TARGET_LAYER" \
+        "$CACHE_REQUESTS" \
+        "$LOG_SAMPLES" \
         "$LMMS_EVAL_HOME" \
         "$script_path" \
         >> "$QUEUE_FILE"
@@ -51,5 +54,6 @@ echo "  TARGET_LAYER=${TARGET_LAYER}"
 echo "  LMMS_EVAL_HOME=${LMMS_EVAL_HOME}"
 echo "  DONE_DIR=${DONE_DIR}"
 echo "  CACHE_REQUESTS=${CACHE_REQUESTS}"
+echo "  LOG_SAMPLES=${LOG_SAMPLES}"
 
 bash "${SCRIPT_DIR}/run_cached_watchdog.sh" "$QUEUE_FILE"

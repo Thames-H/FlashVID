@@ -6,6 +6,7 @@ multimodal stack.
 """
 
 import contextlib
+import inspect
 import json
 import math
 import os
@@ -476,6 +477,32 @@ def _get_scoring_text_positions(
     return fallback_positions
 
 
+def _call_qwen3_get_rope_index(
+    model: Qwen3VLModel,
+    input_ids: torch.Tensor,
+    image_grid_thw: Optional[torch.Tensor],
+    video_grid_thw: Optional[torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+    mm_token_type_ids: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    parameters = inspect.signature(model.get_rope_index).parameters
+    if "mm_token_type_ids" in parameters:
+        return model.get_rope_index(
+            input_ids,
+            mm_token_type_ids=mm_token_type_ids,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            attention_mask=attention_mask,
+        )
+
+    return model.get_rope_index(
+        input_ids,
+        image_grid_thw,
+        video_grid_thw,
+        attention_mask=attention_mask,
+    )
+
+
 def _videomme_question_text(doc, include_options: bool = True) -> str:
     question = str(doc.get("question", "")).strip()
     if not include_options:
@@ -816,11 +843,13 @@ def _make_fetp_forward(
             if (
                 prefill_compiled_stage or prefill_noncompiled_stage
             ) or self.rope_deltas is None:
-                position_ids, rope_deltas = self.get_rope_index(
-                    input_ids,
-                    image_grid_thw,
-                    video_grid_thw,
+                position_ids, rope_deltas = _call_qwen3_get_rope_index(
+                    self,
+                    input_ids=input_ids,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
                     attention_mask=attention_mask_tensor,
+                    mm_token_type_ids=mm_token_type_ids,
                 )
                 self.rope_deltas = rope_deltas
             else:

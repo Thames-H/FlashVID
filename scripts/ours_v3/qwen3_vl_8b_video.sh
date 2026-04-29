@@ -14,6 +14,7 @@ MAIN_PROCESS_PORT=18894
 BATCH_SIZE=1
 LOG_SAMPLES_SUFFIX="qwen3_vl_ours_v3_8b_video"
 OUTPUT_PATH="./logs/ours_v3_qwen3_vl_8b_video"
+CACHE_REQUESTS="true"
 TASKS=("videomme" "longvideobench_val_v")
 
 AUTODL_MODEL_PATH="$HOME/autodl-tmp/Qwen3-VL-8B-Instruct"
@@ -28,10 +29,15 @@ USE_ALPHA="true"
 USE_DEVIATION="true"
 TWO_STAGE="false"
 TEXT_CHUNK_SIZE=32
+SCORING_TEXT_MODE="benchmark_question"
 STATS_OUTPUT_PATH=""
 
 MAX_NUM_FRAMES=32
 ATTN_IMPLEMENTATION="flash_attention_2"
+OPENCV_LOG_LEVEL="ERROR"
+OPENCV_FFMPEG_LOGLEVEL="8"
+AV_LOG_FORCE_NOCOLOR="1"
+FLASHVID_SUPPRESS_DECODER_STDERR="1"
 
 if [[ -d "$AUTODL_MODEL_PATH" ]]; then
     PRETRAINED="$AUTODL_MODEL_PATH"
@@ -40,8 +46,17 @@ fi
 export CUDA_VISIBLE_DEVICES
 export LMMS_EVAL_USE_CACHE
 export LMMS_EVAL_HOME
+export OPENCV_LOG_LEVEL
+export OPENCV_FFMPEG_LOGLEVEL
+export AV_LOG_FORCE_NOCOLOR
+export FLASHVID_SUPPRESS_DECODER_STDERR
 
-BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_num_frames=$MAX_NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE"
+REQUEST_CACHE_ARGS=()
+if [[ -n "$CACHE_REQUESTS" ]]; then
+    REQUEST_CACHE_ARGS=(--cache_requests "$CACHE_REQUESTS")
+fi
+
+BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_num_frames=$MAX_NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE,scoring_text_mode=$SCORING_TEXT_MODE"
 if [[ -n "$STATS_OUTPUT_PATH" ]]; then
     BASE_MODEL_ARGS="$BASE_MODEL_ARGS,stats_output_path=$STATS_OUTPUT_PATH"
 fi
@@ -59,6 +74,7 @@ for retention_ratio in "${RETENTION_RATIOS[@]}"; do
         --model_args "$MODEL_ARGS" \
         --tasks "$task" \
         --batch_size "$BATCH_SIZE" \
+        "${REQUEST_CACHE_ARGS[@]}" \
         --log_samples \
         --log_samples_suffix "$LOG_SAMPLES_SUFFIX" \
         --output_path "$OUTPUT_PATH"

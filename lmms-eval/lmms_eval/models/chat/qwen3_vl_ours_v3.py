@@ -5,9 +5,11 @@ This adapts the per-text-token FETP-v3 scoring used in the external
 multimodal stack.
 """
 
+import contextlib
 import json
 import math
 import os
+import sys
 import time
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -54,6 +56,60 @@ if not _has_qwen_vl:
         "Failed to import qwen_vl_utils; "
         "Please install it via `pip install qwen-vl-utils`"
     )
+
+
+def _quiet_video_decoder_warnings():
+    os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+    os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")
+    os.environ.setdefault("AV_LOG_FORCE_NOCOLOR", "1")
+    os.environ.setdefault("FLASHVID_SUPPRESS_DECODER_STDERR", "1")
+
+    try:
+        import av
+
+        av.logging.set_level(getattr(av.logging, "PANIC", 0))
+    except Exception:
+        pass
+
+    try:
+        import cv2
+
+        log_level_silent = getattr(cv2, "LOG_LEVEL_SILENT", 0)
+        cv2.setLogLevel(log_level_silent)
+    except Exception:
+        pass
+
+
+def _should_suppress_video_decoder_stderr():
+    return os.getenv("FLASHVID_SUPPRESS_DECODER_STDERR", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+@contextlib.contextmanager
+def _suppress_video_decoder_stderr():
+    if not _should_suppress_video_decoder_stderr():
+        yield
+        return
+
+    saved_stderr_fd = None
+    try:
+        sys.stderr.flush()
+        saved_stderr_fd = os.dup(2)
+        with open(os.devnull, "w") as devnull:
+            os.dup2(devnull.fileno(), 2)
+            yield
+    finally:
+        if saved_stderr_fd is not None:
+            sys.stderr.flush()
+            os.dup2(saved_stderr_fd, 2)
+            os.close(saved_stderr_fd)
+
+
+_quiet_video_decoder_warnings()
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +394,124 @@ def _slice_visual_inputs(
     return visual_pos_masks, deepstack_visual_embeds
 
 
+def _visual_related_token_ids(config, device) -> torch.Tensor:
+    token_ids = []
+    for attr_name in (
+        "vision_start_token_id",
+        "vision_end_token_id",
+        "image_token_id",
+        "video_token_id",
+    ):
+        token_id = getattr(config, attr_name, None)
+        if token_id is not None:
+            token_ids.append(int(token_id))
+    return torch.tensor(token_ids, device=device)
+
+
+def _find_subsequence_positions(
+    sequence: torch.Tensor,
+    pattern: torch.Tensor,
+) -> Optional[torch.Tensor]:
+    if pattern.numel() == 0 or pattern.numel() > sequence.numel():
+        return None
+
+    sequence_cpu = sequence.detach().cpu()
+    pattern_cpu = pattern.detach().cpu()
+    for start in range(sequence.numel() - pattern.numel() + 1):
+        end = start + pattern.numel()
+        if torch.equal(sequence_cpu[start:end], pattern_cpu):
+            return torch.arange(start, end, device=sequence.device)
+    return None
+
+
+def _get_scoring_text_positions(
+    input_ids: torch.Tensor,
+    visual_positions: torch.Tensor,
+    config,
+    scoring_input_ids: Optional[torch.Tensor],
+) -> torch.Tensor:
+    fallback_positions = _get_suffix_text_positions(
+        input_ids,
+        visual_positions,
+        config,
+    )
+    if scoring_input_ids is None:
+        return fallback_positions
+
+    if scoring_input_ids.ndim > 1:
+        scoring_input_ids = scoring_input_ids[0]
+    scoring_input_ids = scoring_input_ids.to(input_ids.device).flatten()
+
+    visual_related_token_ids = _visual_related_token_ids(
+        config,
+        input_ids.device,
+    )
+    if visual_related_token_ids.numel() > 0:
+        scoring_input_ids = scoring_input_ids[
+            ~torch.isin(scoring_input_ids, visual_related_token_ids)
+        ]
+
+    max_trim = min(3, int(scoring_input_ids.numel()))
+    for left_trim in range(max_trim + 1):
+        for right_trim in range(max_trim + 1):
+            end = scoring_input_ids.numel() - right_trim
+            if end <= left_trim:
+                continue
+            candidate = scoring_input_ids[left_trim:end]
+            positions = _find_subsequence_positions(input_ids, candidate)
+            if positions is not None:
+                if visual_related_token_ids.numel() > 0:
+                    visual_mask = torch.isin(
+                        input_ids.index_select(0, positions),
+                        visual_related_token_ids,
+                    )
+                    positions = positions[~visual_mask]
+                if positions.numel() > 0:
+                    return positions
+
+    eval_logger.debug(
+        "FETP(Qwen3-VL/V3): scoring text tokens were not found in the "
+        "full prompt; falling back to the prompt suffix."
+    )
+    return fallback_positions
+
+
+def _videomme_question_text(doc, include_options: bool = True) -> str:
+    question = str(doc.get("question", "")).strip()
+    if not include_options:
+        return question
+    options = "\n".join(str(option) for option in doc.get("options", []))
+    return f"{question}\n{options}".strip()
+
+
+def _longvideobench_question_text(doc, include_options: bool = True) -> str:
+    question = str(doc.get("question", "")).strip()
+    if not include_options:
+        return question
+    candidates = []
+    for i in range(5):
+        candidate = doc.get(f"option{i}")
+        if candidate and candidate != "N/A":
+            candidates.append(f"{chr(ord('A') + i)}. {candidate}")
+    return f"{question}\n" + "\n".join(candidates)
+
+
+def _benchmark_question_text(
+    task: str,
+    doc,
+    include_options: bool = True,
+) -> Optional[str]:
+    task_name = str(task).lower()
+    if task_name.startswith("videomme"):
+        return _videomme_question_text(doc, include_options=include_options)
+    if task_name.startswith("longvideobench"):
+        return _longvideobench_question_text(
+            doc,
+            include_options=include_options,
+        ).strip()
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Forward extraction and patched forward.
 # ---------------------------------------------------------------------------
@@ -516,6 +690,7 @@ def _make_fetp_forward(
         video_grid_thw: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         mm_token_type_ids: Optional[torch.IntTensor] = None,
+        fetp_scoring_input_ids: Optional[torch.Tensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, Qwen3VLModelOutputWithPast]:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -532,6 +707,12 @@ def _make_fetp_forward(
         )
         if is_prefill_stage or not hasattr(self, "_fetp_last_pruning_stats"):
             self._fetp_last_pruning_stats = {}
+        if fetp_scoring_input_ids is None:
+            fetp_scoring_input_ids = getattr(
+                self,
+                "_fetp_scoring_input_ids",
+                None,
+            )
 
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
@@ -755,10 +936,11 @@ def _make_fetp_forward(
                     )
                 num_keep = min(num_keep, int(n_visual_tokens))
 
-                text_positions = _get_suffix_text_positions(
+                text_positions = _get_scoring_text_positions(
                     input_ids[0],
                     visual_positions,
                     self.config,
+                    fetp_scoring_input_ids,
                 )
                 (
                     resolved_scoring_method,
@@ -1009,6 +1191,7 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
         use_deviation: bool = True,
         two_stage: bool = False,
         text_chunk_size: Optional[int] = 32,
+        scoring_text_mode: str = "full_prompt",
         stats_output_path: Optional[str] = None,
         # Backward-compatible legacy v3 arguments.
         anchor_layers: Optional[Union[str, Sequence[int]]] = None,
@@ -1049,10 +1232,13 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
         self.use_deviation = use_deviation
         self.two_stage = two_stage
         self.text_chunk_size = text_chunk_size
+        self.scoring_text_mode = str(scoring_text_mode)
+        self.attn_implementation = attn_implementation
         self.stats_output_path = stats_output_path
         self._cache_identity = {
             "retention_ratio": retention_ratio,
             "scoring_method": scoring_method,
+            "scoring_text_mode": self.scoring_text_mode,
             "shallow_layers": shallow_layers,
             "target_layer": target_layer,
             "use_alpha": use_alpha,
@@ -1108,8 +1294,60 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
             f"target_layer={target_layer}, "
             f"two_stage={two_stage}, "
             f"text_chunk_size={text_chunk_size}, "
+            f"scoring_text_mode={self.scoring_text_mode}, "
             f"stats_output_path={stats_output_path}"
         )
+
+    def _set_fetp_scoring_input_ids(self, scoring_input_ids):
+        inner_model = getattr(self.model, "model", None)
+        if inner_model is not None:
+            setattr(inner_model, "_fetp_scoring_input_ids", scoring_input_ids)
+
+    def _prepare_fetp_scoring_input_ids(self, *, task, doc, inputs):
+        self._set_fetp_scoring_input_ids(None)
+        if self.scoring_text_mode in ("", "full", "full_prompt", "suffix"):
+            return
+
+        question_with_options_modes = (
+            "benchmark_question",
+            "question",
+            "question_with_options",
+        )
+        question_only_modes = (
+            "benchmark_question_only",
+            "question_only",
+            "question_no_options",
+        )
+
+        if self.scoring_text_mode not in (
+            *question_with_options_modes,
+            *question_only_modes,
+        ):
+            eval_logger.warning(
+                "FETP(Qwen3-VL/V3): unknown scoring_text_mode="
+                f"{self.scoring_text_mode!r}; using the full prompt suffix."
+            )
+            return
+
+        scoring_text = _benchmark_question_text(
+            task,
+            doc,
+            include_options=self.scoring_text_mode in question_with_options_modes,
+        )
+        if not scoring_text:
+            eval_logger.warning(
+                f"FETP(Qwen3-VL/V3): no benchmark-specific scoring text "
+                f"for task={task}; using the full prompt suffix."
+            )
+            return
+
+        scoring_text = f"\n{scoring_text.strip()}\n"
+        scoring_input_ids = self.tokenizer(
+            scoring_text,
+            add_special_tokens=False,
+            return_tensors="pt",
+        ).input_ids.to(inputs["input_ids"].device)
+        self._set_fetp_scoring_input_ids(scoring_input_ids)
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         _fes_distribution_stats.clear()
@@ -1163,11 +1401,13 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 task,
                 split,
             ) = zip(*[request.args for request in chunk_requests])
+            docs = [
+                self.task_dict[task_name][split_name][ids]
+                for ids, task_name, split_name in zip(doc_id, task, split)
+            ]
             chat_messages = [
-                doc_to_messages[idx](self.task_dict[task][split][ids])
-                for idx, (ids, task, split) in enumerate(
-                    zip(doc_id, task, split)
-                )
+                doc_to_messages[idx](doc)
+                for idx, doc in enumerate(docs)
             ]
             chat_messages = [
                 ChatMessages(**{"messages": message})
@@ -1192,12 +1432,15 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 add_generation_prompt=True,
             )
 
-            image_inputs, video_inputs, video_kwargs_qwen = process_vision_info(
-                batched_messages,
-                return_video_kwargs=True,
-                image_patch_size=16,
-                return_video_metadata=True,
-            )
+            with _suppress_video_decoder_stderr():
+                image_inputs, video_inputs, video_kwargs_qwen = (
+                    process_vision_info(
+                        batched_messages,
+                        return_video_kwargs=True,
+                        image_patch_size=16,
+                        return_video_metadata=True,
+                    )
+                )
             processor_video_kwargs = _build_processor_video_kwargs(
                 video_kwargs_qwen
             )
@@ -1237,6 +1480,25 @@ class Qwen3_VL_Ours_V3(Qwen3_VLSimple):
                 inputs = inputs.to("cuda")
             else:
                 inputs = inputs.to(self.device)
+
+            if len(docs) == 1:
+                self._prepare_fetp_scoring_input_ids(
+                    task=task[0],
+                    doc=docs[0],
+                    inputs=inputs,
+                )
+            else:
+                self._set_fetp_scoring_input_ids(None)
+                if self.scoring_text_mode not in (
+                    "",
+                    "full",
+                    "full_prompt",
+                    "suffix",
+                ):
+                    eval_logger.warning(
+                        "FETP(Qwen3-VL/V3): benchmark-specific scoring text "
+                        "requires batch_size=1; using the full prompt suffix."
+                    )
 
             default_gen_kwargs = {
                 "max_new_tokens": 128,

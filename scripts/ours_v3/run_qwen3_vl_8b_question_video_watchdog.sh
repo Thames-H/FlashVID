@@ -5,6 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
+if [[ "${WATCHDOG_RESPAWN:-true}" == "true" && "${WATCHDOG_SUPERVISED:-false}" != "true" ]]; then
+    export WATCHDOG_SUPERVISED="true"
+    exec bash "${SCRIPT_DIR}/run_watchdog_respawn.sh" -- "$0" "$@"
+fi
+
 TARGET_LAYER="${1:-${TARGET_LAYER:-18}}"
 
 if [[ ! "$TARGET_LAYER" =~ ^-?[0-9]+$ ]]; then

@@ -49,6 +49,22 @@ timestamp() {
     date "+%Y-%m-%d %H:%M:%S"
 }
 
+describe_exit_status() {
+    local status="$1"
+    case "$status" in
+        137) printf "exit code 137 (SIGKILL, likely OOM)" ;;
+        143) printf "exit code 143 (SIGTERM)" ;;
+        130) printf "exit code 130 (SIGINT)" ;;
+        *)
+            if (( status > 128 )); then
+                printf "exit code %s (signal %s)" "$status" "$((status - 128))"
+            else
+                printf "exit code %s" "$status"
+            fi
+            ;;
+    esac
+}
+
 trim() {
     local value="$1"
     value="${value#"${value%%[![:space:]]*}"}"
@@ -175,7 +191,7 @@ run_job_until_done() {
 
         retries=$((retries + 1))
         printf "%s" "$retries" > "$retry_file"
-        echo "[$(timestamp)] ${job_name} failed with exit code ${status}; retry ${retries} recorded." >&2
+        echo "[$(timestamp)] ${job_name} failed with $(describe_exit_status "$status"); retry ${retries} recorded." >&2
         echo "[$(timestamp)] Existing lmms-eval cache is preserved; next run will reuse cached samples." >&2
         sleep "$RETRY_DELAY"
     done

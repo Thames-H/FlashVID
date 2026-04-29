@@ -33,6 +33,9 @@ SCORING_TEXT_MODE="benchmark_question_only"
 STATS_OUTPUT_PATH=""
 
 MAX_NUM_FRAMES=32
+DEVICE_MAP="auto"
+MIN_PIXELS=$((64 * 28 * 28))
+MAX_PIXELS=$((256 * 28 * 28))
 ATTN_IMPLEMENTATION="flash_attention_2"
 OPENCV_LOG_LEVEL="ERROR"
 OPENCV_FFMPEG_LOGLEVEL="8"
@@ -56,7 +59,7 @@ if [[ -n "$CACHE_REQUESTS" ]]; then
     REQUEST_CACHE_ARGS=(--cache_requests "$CACHE_REQUESTS")
 fi
 
-BASE_MODEL_ARGS="pretrained=$PRETRAINED,max_num_frames=$MAX_NUM_FRAMES,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE,scoring_text_mode=$SCORING_TEXT_MODE"
+BASE_MODEL_ARGS="pretrained=$PRETRAINED,device_map=$DEVICE_MAP,max_num_frames=$MAX_NUM_FRAMES,max_pixels=$MAX_PIXELS,min_pixels=$MIN_PIXELS,attn_implementation=$ATTN_IMPLEMENTATION,scoring_method=$SCORING_METHOD,shallow_layers=$SHALLOW_LAYERS,target_layer=$TARGET_LAYER,use_alpha=$USE_ALPHA,use_deviation=$USE_DEVIATION,two_stage=$TWO_STAGE,text_chunk_size=$TEXT_CHUNK_SIZE,scoring_text_mode=$SCORING_TEXT_MODE"
 if [[ -n "$STATS_OUTPUT_PATH" ]]; then
     BASE_MODEL_ARGS="$BASE_MODEL_ARGS,stats_output_path=$STATS_OUTPUT_PATH"
 fi

@@ -1,18 +1,24 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
 # FETP for LLaVA-1.5 (HF format)
 # Mode: full (approach 3)
 
-cd /workspace/home/qianjiawen/code_data/FlashVID/lmms-eval
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+LMMS_EVAL_ROOT="${LMMS_EVAL_ROOT:-${PROJECT_ROOT}/lmms-eval}"
 
-source activate
-conda activate fv-clean
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+export HF_HOME="${HF_HOME:-${HOME}/autodl-tmp/hf_cache}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,6,7}"
+
+cd "$LMMS_EVAL_ROOT"
 
 # Evaluation benchmarks.
 TASKS=("mme")
 
-# Pretrained model path.
-PRETRAINED="/workspace/video_general_data_cloud/qianjiawen/ckpt/llava-hf/llava1_5-7b"
+# This custom adapter expects the Transformers-converted LLaVA format.
+PRETRAINED="${PRETRAINED:-llava-hf/llava-1.5-7b-hf}"
 
 # FETP arguments.
 RETENTION_RATIOS=(64 128 192)
@@ -30,15 +36,15 @@ for retention_ratio in "${RETENTION_RATIOS[@]}"; do
     MODEL_ARGS="$BASE_MODEL_ARGS,retention_ratio=${retention_ratio}"
     for task in "${TASKS[@]}"; do
         echo "Evaluating task: $task"
-        CUDA_VISIBLE_DEVICES=0,1,6,7 accelerate launch \
+        accelerate launch \
         --main_process_port 18899 \
         --num_processes 4 \
         -m lmms_eval \
         --model llava_hf_ours_v2 \
-        --model_args $MODEL_ARGS \
-        --tasks $task \
+        --model_args "$MODEL_ARGS" \
+        --tasks "$task" \
         --batch_size 1 \
-        --output_path /workspace/home/qianjiawen/code_data/FlashVID/lmms-eval/logs/llava_hf_ours_v2 \
+        --output_path "${PROJECT_ROOT}/logs/llava_hf_ours_v2" \
         --verbosity=DEBUG
     done
     echo "Finished running with retention_ratio=${retention_ratio}"

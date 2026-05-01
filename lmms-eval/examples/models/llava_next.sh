@@ -6,7 +6,7 @@ python3 -m accelerate.commands.launch \
     --num_processes=8 \
     -m lmms_eval \
     --model llava \
-    --model_args pretrained="liuhaotian/llava-v1.5-7b" \
+    --model_args pretrained="${HOME}/autodl-tmp/llavav-1.5-7b,device_map=auto" \
     --tasks mme \
     --batch_size 1 \
     --log_samples \

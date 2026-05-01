@@ -1,4 +1,4 @@
-dataset_path: /root/autodl-tmp/benchmark/ScienceQA
+dataset_path: lmms-lab/ScienceQA
 dataset_name: ScienceQA-IMG
 task: "scienceqa_img"
 dataset_kwargs:

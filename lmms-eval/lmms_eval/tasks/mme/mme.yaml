@@ -1,7 +1,6 @@
-dataset_path: /root/autodl-tmp/benchmark/MME
+dataset_path: lmms-lab/MME
 dataset_kwargs:
   token: False
-  cache_dir: /root/autodl-tmp/benchmark/MME
 task: "mme"
 test_split: test
 output_type: generate_until
